@@ -278,6 +278,20 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
             snapshot["alertas"].append("Painel de Serviços ainda não integrado (stub).")
         elif painel["status"] == "erro":
             snapshot["alertas"].append(f"Painel com erro: {painel['dados'].get('erro')}")
+        elif painel["status"] == "ok":
+            dados = painel["dados"] or {}
+            tot = dados.get("totais") or {}
+            saude = tot.get("saudeGeral") or (dados.get("normalizado") or {}).get("saudeGeral")
+            if saude:
+                snapshot["alertas"].append(f"Hub de Status — saúde geral: {saude}.")
+            n_prob = int(tot.get("com_problema") or 0)
+            if n_prob > 0:
+                snapshot["alertas"].append(f"{n_prob} item(ns) com problema no Hub (serviço/WAHA).")
+            n_cli = int(tot.get("clientes_problema") or 0)
+            if n_cli > 0:
+                snapshot["alertas"].append(f"{n_cli} cliente(s) partial/offline no Hub.")
+            for a in (dados.get("alertas_api") or [])[:6]:
+                snapshot["alertas"].append(f"Hub: {a}")
 
     if chatwoot:
         snapshot["chatwoot"] = chatwoot["dados"]

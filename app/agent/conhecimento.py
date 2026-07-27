@@ -62,11 +62,17 @@ Sobre a CAUSA do erro:
 O reprocessamento em si é do sistema do Francisco. Nós detectamos, filtramos
 pausa, organizamos o payload e disparamos o POST quando REPROCESS_ENABLED=true.
 
-### [FASE 2] Painel de Serviços (painel-infinity)
-Monitoramento online/offline/instabilidade dos serviços dos clientes, bugs
-abertos. Endpoints previstos: /api/status/overview, /api/clientes,
-/api/clientes/:id/servicos. Enquanto stub: diga explicitamente que a fonte
-não está conectada — NUNCA invente status de serviço.
+### [FASE 2] Painel de Serviços (Hub de Status Infinity)
+API: https://painel-infinity.vercel.app (Basic ou Bearer).
+Endpoints principais: /api/status/overview (alertas 24h),
+/api/relatorio-diario (relatório 08h/18h), /api/clientes e
+/api/clientes/{slug}/servicos.
+
+Enums: health do cliente operational|partial|offline;
+status de serviço online|offline|degraded; saudeGeral ok|atencao|critico.
+Use os alertas e totais do snapshot — não invente uptime.
+
+Também traz bloco `numeros` (sessões WAHA do hub). Se pendente, diga o motivo.
 
 ## O que o relatório precisa cobrir (Gestão — fase 1)
 1. Visão executiva: quantos atrasos, vencendo hoje, clientes em risco.

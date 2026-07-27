@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.collectors import painel, waha_health
+from app.collectors import waha_health
 from app.config import get_settings
 from app.services.alert_state import alert_state
 from app.services.delivery import enviar_alerta
@@ -59,47 +59,48 @@ async def _tick_painel() -> None:
     s = get_settings()
     if not s.painel_enabled:
         return
-    resultado = await painel.coletar()
+    # Overview leve — não chama /api/relatorio-diario no poller.
+    from app.collectors.painel import coletar_overview_leve
+
+    resultado = await coletar_overview_leve()
     if resultado["status"] != "ok":
         chave = "painel:coleta"
         if alert_state.mudou(chave, resultado["status"]):
             await enviar_alerta(
-                f"Falha ao consultar Painel de Serviços.\n{resultado.get('dados')}",
+                f"Falha ao consultar Hub de Status.\n{resultado.get('dados')}",
                 titulo="Alerta Painel",
             )
         return
 
     dados = resultado["dados"] or {}
-    # Formato ainda genérico até a API oficial. Aceita overview com lista de serviços.
-    overview = dados.get("overview") or dados
-    servicos = []
-    if isinstance(overview, dict):
-        for key in ("servicos", "services", "items", "clientes"):
-            if isinstance(overview.get(key), list):
-                servicos = overview[key]
-                break
-    if isinstance(overview, list):
-        servicos = overview
+    saude = str((dados.get("totais") or {}).get("saudeGeral") or "")
+    if saude and alert_state.mudou("painel:saudeGeral", saude):
+        if saude in ("atencao", "critico"):
+            alertas = (dados.get("normalizado") or {}).get("alertas_api") or []
+            linhas = "\n".join(f"- {a}" for a in alertas[:8]) or "(sem detalhe)"
+            await enviar_alerta(
+                f"Saúde geral do Hub: *{saude}*\n{linhas}",
+                titulo="Alerta Hub de Status",
+            )
 
-    for item in servicos:
+    for item in dados.get("servicos") or []:
         if not isinstance(item, dict):
             continue
-        nome = str(item.get("nome") or item.get("name") or item.get("servico") or item.get("id") or "?")
-        status = str(
-            item.get("status") or item.get("estado") or item.get("health") or "unknown"
-        ).lower()
-        chave = f"painel:servico:{nome}"
-        nivel = "ok" if status in ("ok", "up", "online", "healthy", "ativo") else "ruim"
+        nome = str(item.get("nome") or "?")
+        tipo = str(item.get("tipo") or "servico")
+        status = str(item.get("status") or "unknown").lower()
+        nivel = str(item.get("nivel") or "ruim")
+        chave = f"painel:{tipo}:{nome}"
         if alert_state.mudou(chave, f"{nivel}:{status}"):
-            if nivel == "ruim":
+            if nivel != "ok":
                 await enviar_alerta(
-                    f"Serviço *{nome}* com problema.\nStatus: `{status}`",
-                    titulo="Alerta Painel — serviço",
+                    f"*{tipo}* `{nome}` com problema.\nStatus: `{status}`",
+                    titulo="Alerta Hub de Status",
                 )
             else:
                 await enviar_alerta(
-                    f"Serviço *{nome}* recuperado.\nStatus: `{status}`",
-                    titulo="Recuperação Painel",
+                    f"*{tipo}* `{nome}` recuperado.\nStatus: `{status}`",
+                    titulo="Recuperação Hub de Status",
                 )
 
 

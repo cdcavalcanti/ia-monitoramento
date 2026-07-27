@@ -22,9 +22,14 @@ class Settings(BaseSettings):
     gestao_api_base_url: str = "https://gestao-infinity.ai-infinity.io"
     relatorio_api_token: str = ""
 
-    # ---- Painel de Serviços (fase 2) ----
-    painel_api_base_url: str = ""
+    # ---- Painel de Serviços / Hub de Status ----
+    painel_api_base_url: str = "https://painel-infinity.vercel.app"
     painel_api_token: str = ""
+    # Basic Auth (realm Hub de Status Infinity) — preferencial
+    painel_api_user: str = ""
+    painel_api_password: str = ""
+    # Alternativa: user:senha numa linha só
+    painel_basic_auth: str = ""
     painel_enabled: bool = False
 
     # ---- Chatwoot saúde das IAs ----

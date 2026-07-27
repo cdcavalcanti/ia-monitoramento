@@ -36,9 +36,16 @@ em risco, fontes offline/stub).
 - Eficiência do time (tabela compacta ou bullets)
 - Entregas recentes com resumoStatus (se houver)
 
-## 3. Painel de Serviços
+## 3. Painel de Serviços (Hub de Status)
 Se status stub/erro: diga isso em 1–2 linhas. Não invente uptime.
-Se ok: status online/offline/instável e bugs abertos. Destaque o que está FORA.
+Se ok:
+- saudeGeral (ok/atencao/critico)
+- servidores online/offline
+- serviços HTTP com falha (nome + status + ms se houver)
+- clientes partial/offline (top)
+- números WAHA do hub (conectados/desconectados ou motivo pendente)
+- alertas_api do próprio hub
+- custo total só se vier no snapshot (não inventar)
 
 ## 3.1 WAHA (instâncias WhatsApp)
 Se ok: liste sessões WORKING vs ruins. Se stub: diga que o monitor de sessões está off.
