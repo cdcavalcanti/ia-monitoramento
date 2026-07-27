@@ -1,0 +1,1 @@
+"""Collectors de fontes externas."""
