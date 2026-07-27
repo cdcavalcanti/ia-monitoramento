@@ -1,0 +1,103 @@
+# ia-monitoramento-infinity
+
+Relatório diário automático do ecossistema Infinity: **projetos/tarefas (Gestão)**,
+e em seguida (fase 2) **Painel de Serviços** + **saúde das IAs no Chatwoot**.
+
+Espelha a arquitetura do `realdeal-sdr` (FastAPI + LangGraph/LangChain +
+pydantic-settings + Docker), adaptada de atendimento conversacional para
+**monitoramento e síntese de relatório**.
+
+## Arquitetura
+
+```
+scheduler / POST /relatorio/gerar
+        │
+        ▼
+ ┌──────────────┐   ┌─────────────┐   ┌──────────────────┐
+ │ Gestão API   │   │ Painel API  │   │ Chatwoot health  │
+ │ (fase 1 OK)  │   │ (stub)      │   │ (stub)           │
+ └──────┬───────┘   └──────┬──────┘   └────────┬─────────┘
+        └────────────┬─────┴───────────────────┘
+                     ▼
+              aggregator (determinístico)
+                     ▼
+              LLM síntese (Markdown)
+                     ▼
+         data/relatorios/YYYY-MM-DD.md|.json
+                     │
+                     └──► WAHA (opcional)
+```
+
+**Padrões herdados do SDR:**
+- `conhecimento.py` = fatos; `prompts.py` = mecânica
+- Classificação (atraso, totais, tops) **fora** do LLM
+- Config = fonte de verdade sincronizada com `.env.example`
+- Fail-open na entrega WhatsApp; relatório sempre salvo em disco
+- Webhook/API não inventa dados de fonte stub
+
+## Rodando local
+
+```bash
+python -m venv .venv
+.\.venv\Scripts\pip install -r requirements.txt
+copy .env.example .env
+# preencha RELATORIO_API_TOKEN e OPENAI_API_KEY
+```
+
+Smokes sem rede:
+
+```bash
+.\.venv\Scripts\python -m scripts.smoke_aggregator
+.\.venv\Scripts\python -m scripts.smoke_fallback
+```
+
+Smoke com a API de Gestão (precisa token):
+
+```bash
+.\.venv\Scripts\python -m scripts.smoke_gestao
+```
+
+Gerar relatório agora:
+
+```bash
+.\.venv\Scripts\python -m scripts.gerar_relatorio_cli --sem-envio --print
+```
+
+Subir o serviço:
+
+```bash
+docker compose up -d --build
+curl http://127.0.0.1:8010/health
+curl -X POST http://127.0.0.1:8010/relatorio/gerar -H "Content-Type: application/json" -d "{\"enviar\":false}"
+```
+
+## Endpoints
+
+| Método | Rota | Uso |
+|--------|------|-----|
+| GET | `/health` | config carregada |
+| POST | `/relatorio/gerar` | gera agora (`enviar`, `forcar`) |
+| GET | `/relatorio/ultimo` | último markdown + alertas |
+| POST | `/perguntar` | Q&A sobre o último relatório (ReAct + tools) |
+
+## Variáveis importantes
+
+| Var | Função |
+|-----|--------|
+| `RELATORIO_API_TOKEN` | token `X-Relatorio-Token` do Gestão |
+| `GESTAO_API_BASE_URL` | default `https://gestao-infinity.ai-infinity.io` |
+| `OPENAI_API_KEY` | síntese LLM (sem key = fallback estruturado) |
+| `REPORT_HOUR` / `REPORT_MINUTE` | horário do job (TZ `America/Sao_Paulo`) |
+| `SCHEDULER_ENABLED` | `false` = só sob demanda |
+| `PAINEL_*` / `CHATWOOT_HEALTH_ENABLED` | fase 2 |
+| `NOTIFY_WHATSAPP_TO` + `WAHA_*` | entrega do resumo |
+
+## Fase 2 (quando as APIs chegarem)
+
+1. Preencher `app/collectors/painel.py` com os endpoints reais e header correto
+2. Expandir `app/collectors/chatwoot_health.py` com regras de erro/pausa/reprocessamento
+3. Atualizar `app/agent/conhecimento.py` (fatos) — o prompt já reserva as seções 3 e 4
+4. Ligar `PAINEL_ENABLED=true` e/ou `CHATWOOT_HEALTH_ENABLED=true`
+
+**Fora de escopo desta IA:** automatizar reprocessamento de leads no Chatwoot.
+O relatório só alerta; a ação fica em serviço separado.

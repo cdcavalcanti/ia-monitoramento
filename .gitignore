@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/**
+!data/.gitkeep
+*.db
+.DS_Store
+docs/painel_api_*.json
+docs/sample_*.json
+docs/painel-docs.html
+docs/painel-docs-raw.html
