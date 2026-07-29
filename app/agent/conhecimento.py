@@ -49,6 +49,7 @@ Regra operacional (já no código):
 - Varre conversas abertas.
 - Se a última mensagem do lead (incoming) está há >= CHATWOOT_SILENCE_MINUTES
   (default 5) sem outgoing depois → silêncio da IA.
+- Só conta se o último incoming for do dia corrente (America/Sao_Paulo). Dias anteriores são ignorados.
 - Se a conversa tem etiqueta pausar_ia (ou aliases) → NÃO reprocessar; só reportar.
 - Se elegível → monta payload estável e oferece ao sistema do Francisco
   (REPROCESS_*), quando ligado.

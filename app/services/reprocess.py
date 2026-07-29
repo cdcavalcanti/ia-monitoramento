@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
+from app.services import metrics
 
 logger = logging.getLogger("monitor.reprocess")
 
@@ -29,6 +30,12 @@ async def enviar_lote(leads: list[dict[str, Any]]) -> dict[str, Any]:
         logger.info(
             "reprocess stub: %d lead(s) prontos, mas REPROCESS_ENABLED/URL off",
             len(elegiveis),
+        )
+        metrics.record_reprocess(
+            kind="stub",
+            count=len(elegiveis),
+            status="stub",
+            detail="REPROCESS_ENABLED=false ou URL vazia",
         )
         return {
             "enviados": 0,
@@ -61,6 +68,12 @@ async def enviar_lote(leads: list[dict[str, Any]]) -> dict[str, Any]:
             except Exception:
                 data = {"raw": resp.text[:500]}
         logger.info("reprocess ok: %d lead(s) → %s", len(elegiveis), url)
+        metrics.record_reprocess(
+            kind="sent",
+            count=len(elegiveis),
+            status="ok",
+            detail=f"http={resp.status_code}",
+        )
         return {
             "enviados": len(elegiveis),
             "pulados": 0,
@@ -70,6 +83,12 @@ async def enviar_lote(leads: list[dict[str, Any]]) -> dict[str, Any]:
         }
     except Exception as e:
         logger.exception("reprocess falhou")
+        metrics.record_reprocess(
+            kind="erro",
+            count=len(elegiveis),
+            status="erro",
+            detail=str(e)[:400],
+        )
         return {
             "enviados": 0,
             "pulados": len(elegiveis),

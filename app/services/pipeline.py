@@ -48,15 +48,43 @@ async def gerar_relatorio_diario(
 
     reprocess_info: dict[str, Any] | None = None
     cw = coletas.get("chatwoot")
+    elegiveis: list[dict[str, Any]] = []
     if cw and cw.get("status") == "ok":
         elegiveis = list((cw.get("dados") or {}).get("leads_elegiveis_reprocessamento") or [])
         if elegiveis:
             reprocess_info = await enviar_lote(elegiveis)
-            snapshot["reprocessamento"] = reprocess_info
+        else:
+            reprocess_info = {
+                "enviados": 0,
+                "pulados": 0,
+                "status": "vazio",
+                "detalhe": "nenhum elegível hoje",
+            }
+    else:
+        reprocess_info = {
+            "enviados": 0,
+            "pulados": 0,
+            "status": "sem_coleta",
+            "detalhe": f"chatwoot status={(cw or {}).get('status')}",
+        }
+
+    snapshot["reprocessamento"] = {
+        **(reprocess_info or {}),
+        "automatico_habilitado": bool(s.reprocess_ready),
+        "elegiveis_detectados": len(elegiveis),
+        "nota": (
+            "Reprocess AUTO ligado — lote enviado ao Francisco."
+            if s.reprocess_ready
+            else "Reprocess AUTO desligado (REPROCESS_ENABLED=false). Detecção ativa; envio só quando Francisco plugar."
+        ),
+    }
 
     from app.agent.graph import sintetizar_relatorio
 
-    relatorio_md = await sintetizar_relatorio(snapshot)
+    relatorio_md = await sintetizar_relatorio(
+        snapshot,
+        conversation_id=f"relatorio-{stamp or rotulo or 'manual'}",
+    )
     paths = store.salvar(relatorio_md, snapshot, stamp=stamp, rotulo=rotulo)
 
     enviado = False
@@ -65,7 +93,7 @@ async def gerar_relatorio_diario(
         if rotulo == "manha":
             titulo = "Relatório manhã (08h) — Infinity Monitor"
         elif rotulo in ("tarde", "fim_do_dia"):
-            titulo = "Relatório fim do dia (18h) — Infinity Monitor"
+            titulo = "Relatório noite (20h) — Infinity Monitor"
         enviado = await enviar_whatsapp(relatorio_md, titulo=titulo)
 
     return {

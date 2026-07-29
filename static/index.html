@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Infinity Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/ops.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand-row">
+        <span class="brand-mark">∞</span>
+        <div>
+          <p class="eyebrow">IA Infinity · Operação 24h</p>
+          <h1>Infinity Monitor</h1>
+        </div>
+      </div>
+        <div class="topbar-actions">
+        <div class="live" id="liveBadge">
+          <span class="pulse" id="pulseDot"></span>
+          <div>
+            <strong id="liveLabel">…</strong>
+            <small id="liveSub">—</small>
+          </div>
+        </div>
+        <div class="live-clock" id="liveClock" title="Atualização automática">
+          <span class="live-dot"></span>
+          <span id="liveClockText">ao vivo</span>
+        </div>
+        <button type="button" class="btn ghost" id="btnRefresh">Atualizar</button>
+        <button type="button" class="btn ghost" id="btnSilencio">Varrer Chatwoot</button>
+        <button type="button" class="btn primary" id="btnRelatorio">Gerar relatório</button>
+      </div>
+    </header>
+
+    <section class="kpis" aria-label="Indicadores">
+      <article class="kpi"><span>Tokens hoje</span><strong id="mTokens">—</strong><small id="mTokensSub">—</small></article>
+      <article class="kpi"><span>Gasto est.</span><strong id="mCost">—</strong><small>USD · Lab ≈ 0</small></article>
+      <article class="kpi"><span>Capturados</span><strong id="mCap">—</strong><small>elegíveis detectados</small></article>
+      <article class="kpi"><span>Reprocess</span><strong id="mSent">—</strong><small id="mSentSub">enviados / stub</small></article>
+      <article class="kpi accent"><span>Fila Chatwoot</span><strong id="mCwFila">—</strong><small id="mCwSub">só hoje</small></article>
+      <article class="kpi danger"><span>WAHA ruins</span><strong id="mWahaRuin">—</strong><small id="mWahaSub">sessões</small></article>
+    </section>
+
+    <div class="fonte-strip" id="fontes"></div>
+
+    <main class="workspace">
+      <section class="board" id="panelCw">
+        <header class="board-h">
+          <div>
+            <h2>Chatwoot</h2>
+            <p class="board-sub" id="cwMeta">Leads sem resposta (hoje)</p>
+          </div>
+          <div class="seg" id="cwTabs">
+            <button type="button" class="seg-btn on" data-tab="elegiveis">Elegíveis <b id="cwNEleg">0</b></button>
+            <button type="button" class="seg-btn" data-tab="pausados">Pausados <b id="cwNPaus">0</b></button>
+            <button type="button" class="seg-btn" data-tab="contas">Por conta</button>
+          </div>
+        </header>
+        <div class="card-list" id="cwList"></div>
+      </section>
+
+      <section class="board" id="panelWaha">
+        <header class="board-h">
+          <div>
+            <h2>WAHA</h2>
+            <p class="board-sub" id="wahaMeta">Sessões que precisam atenção</p>
+          </div>
+          <div class="stat-row" id="wahaStats"></div>
+        </header>
+        <div class="card-list" id="wahaList"></div>
+      </section>
+
+      <section class="board" id="panelHub">
+        <header class="board-h">
+          <div>
+            <h2>Hub de Status</h2>
+            <p class="board-sub" id="hubMeta">Serviços e alertas</p>
+          </div>
+          <div class="stat-row" id="hubStats"></div>
+        </header>
+        <div class="card-list" id="hubList"></div>
+      </section>
+
+      <section class="board chat-board" id="panelChat">
+        <header class="board-h">
+          <div>
+            <h2>Conversar</h2>
+            <p class="board-sub" id="chatEngine">Infinity Lab</p>
+          </div>
+        </header>
+        <div class="chat-log" id="chatLog" role="log" aria-live="polite"></div>
+        <form class="chat-form" id="chatForm">
+          <textarea id="chatInput" rows="2" placeholder="Pergunte sobre silêncios, WAHA, Hub…" required></textarea>
+          <button type="submit" class="btn primary" id="chatSend">Enviar</button>
+        </form>
+        <pre class="log" id="actionLog" hidden></pre>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span>Dia <strong id="diaLabel">—</strong> · relatórios <strong id="schedInfo">—</strong></span>
+      <span id="ultimoInfo">—</span>
+    </footer>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+  <aside class="drawer" id="drawer" aria-hidden="true" hidden>
+    <header class="drawer-h">
+      <div>
+        <p class="eyebrow" id="drawerEyebrow">Detalhe</p>
+        <h2 id="drawerTitle">—</h2>
+      </div>
+      <button type="button" class="btn ghost" id="drawerClose">Fechar</button>
+    </header>
+    <div class="drawer-body" id="drawerBody"></div>
+    <footer class="drawer-f" id="drawerFooter"></footer>
+  </aside>
+
+  <script src="/static/ops.js"></script>
+</body>
+</html>

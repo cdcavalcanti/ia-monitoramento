@@ -31,7 +31,11 @@ async def _send_text(texto: str) -> bool:
 
     texto = re.sub(r"^#{1,6}\s*", "", texto.strip(), flags=re.MULTILINE)
     url = f"{s.waha_url}/api/sendText"
-    headers = {"Authorization": f"Bearer {s.waha_token}", "Content-Type": "application/json"}
+    headers = {
+        "X-Api-Key": s.waha_token,
+        "Authorization": f"Bearer {s.waha_token}",
+        "Content-Type": "application/json",
+    }
     body = {"session": s.waha_session, "chatId": chat_id, "text": texto}
 
     try:

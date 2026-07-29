@@ -67,18 +67,31 @@ Subir o serviço:
 
 ```bash
 docker compose up -d --build
+# UI ops (dash + chat):
+# http://127.0.0.1:8010/
 curl http://127.0.0.1:8010/health
 curl -X POST http://127.0.0.1:8010/relatorio/gerar -H "Content-Type: application/json" -d "{\"enviar\":false}"
+```
+
+Local sem Docker:
+
+```bash
+.\.venv\Scripts\uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
 ## Endpoints
 
 | Método | Rota | Uso |
 |--------|------|-----|
+| GET | `/` | **UI** — dash de métricas + chat |
 | GET | `/health` | config carregada |
+| GET | `/ops/status` | fontes, scheduler, último relatório |
+| GET | `/ops/metrics` | tokens/gasto do dia + reprocess capturados/enviados |
 | POST | `/relatorio/gerar` | gera agora (`enviar`, `forcar`) |
 | GET | `/relatorio/ultimo` | último markdown + alertas |
-| POST | `/perguntar` | Q&A sobre o último relatório (ReAct + tools) |
+| GET | `/chatwoot/leads-silencio` | elegíveis de hoje (inboxes IA) |
+| POST | `/chatwoot/reprocessar` | detecta + (se ligado) envia ao Francisco |
+| POST | `/perguntar` | Q&A (Infinity Lab / OpenAI) |
 
 ## Variáveis importantes
 

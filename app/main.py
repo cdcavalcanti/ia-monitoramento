@@ -2,24 +2,30 @@
 
 Fluxo do job diário:
 
-    scheduler/API -> coletores (gestao + stubs) -> aggregator
+    scheduler/API -> coletores -> aggregator
                   -> LLM (síntese) -> store -> WAHA (opcional)
 
-Perguntas pontuais: POST /perguntar usa o agente ReAct com tools sobre o
-último relatório.
+UI ops: GET /  (dash + chat)
+Perguntas: POST /perguntar
 """
 
 from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+import asyncio
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
-from app.services import alert_poller, chatwoot_poller, scheduler, store
+from app.services import alert_poller, chatwoot_poller, metrics, ops_cache, scheduler, store
 from app.services.pipeline import gerar_relatorio_diario
 from app.services.reprocess import enviar_lote
 from app.services.scheduler import horarios_relatorio
@@ -28,11 +34,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("monitor")
 
 settings = get_settings()
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+_started_at = datetime.now(timezone.utc)
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     settings.ensure_dirs()
+    metrics.init()
+    ops_cache.load_disk()
+    metrics.heartbeat("app", "starting", {"pid": "main"})
     logger.info("modelo=%s", settings.openai_chat_model)
     logger.info("gestao=%s", "ok" if settings.gestao_enabled else "SEM TOKEN")
     logger.info("painel_enabled=%s chatwoot_health=%s", settings.painel_enabled, settings.chatwoot_health_enabled)
@@ -45,13 +56,44 @@ async def _lifespan(app: FastAPI):
     await scheduler.start()
     await chatwoot_poller.start()
     await alert_poller.start()
+    metrics.heartbeat("app", "ok", {"uptime_from": _started_at.isoformat()})
+
+    async def _warm_cache() -> None:
+        try:
+            from app.collectors import waha_health
+            from app.collectors.painel import coletar_overview_leve
+
+            if settings.waha_health_enabled:
+                wr = await waha_health.coletar()
+                if wr["status"] == "ok":
+                    ops_cache.set_waha(wr["dados"] or {}, status="ok")
+            if settings.painel_enabled:
+                pr = await coletar_overview_leve()
+                if pr["status"] == "ok":
+                    ops_cache.set_painel(pr["dados"] or {}, status="ok")
+        except Exception:
+            logger.exception("warm cache falhou")
+
+    asyncio.create_task(_warm_cache(), name="ops-warm-cache")
     yield
     await alert_poller.stop()
     await chatwoot_poller.stop()
     await scheduler.stop()
+    metrics.heartbeat("app", "stopped")
 
 
 app = FastAPI(title="ia-monitoramento-infinity", lifespan=_lifespan)
+
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/")
+async def ui_home() -> FileResponse:
+    index = STATIC_DIR / "index.html"
+    if not index.is_file():
+        raise HTTPException(404, "UI não encontrada (static/index.html)")
+    return FileResponse(index)
 
 
 @app.get("/health")
@@ -60,10 +102,14 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "monitor_enabled": settings.monitor_enabled,
         "modelo": settings.openai_chat_model,
+        "infinity_lab": settings.infinity_lab_enabled,
+        "infinity_lab_agent": settings.infinity_lab_agent_id or None,
         "gestao": settings.gestao_enabled,
         "painel": settings.painel_enabled,
         "chatwoot_health": settings.chatwoot_health_enabled,
         "chatwoot_silence_min": settings.chatwoot_silence_minutes,
+        "chatwoot_only_today": settings.chatwoot_only_today,
+        "chatwoot_contas": len(settings.chatwoot_account_list),
         "waha_health": settings.waha_health_enabled,
         "alert_poller": settings.alert_poller_enabled,
         "reprocess": settings.reprocess_ready,
@@ -71,6 +117,118 @@ async def health() -> dict[str, Any]:
         "report_slots": [f"{h:02d}:{m:02d}" for h, m in horarios_relatorio()],
         "report_at": f"{settings.report_hour:02d}:{settings.report_minute:02d} {settings.report_timezone}",
         "whatsapp_delivery": settings.delivery_whatsapp_enabled,
+        "started_at": _started_at.isoformat(),
+    }
+
+
+@app.get("/ops/status")
+async def ops_status() -> dict[str, Any]:
+    """Status operacional para o dash (fontes + uptime + último relatório)."""
+    ultimo = store.carregar_ultimo() or {}
+    snap = ultimo.get("snapshot") or {}
+    contas = settings.chatwoot_account_list
+    return {
+        "ok": True,
+        "uptime_desde": _started_at.isoformat(),
+        "agora": datetime.now(timezone.utc).isoformat(),
+        "operando": bool(settings.monitor_enabled and settings.scheduler_enabled),
+        "fontes": {
+            "gestao": settings.gestao_enabled,
+            "painel": settings.painel_enabled,
+            "chatwoot": settings.chatwoot_health_enabled,
+            "waha": settings.waha_health_enabled,
+            "lab": settings.infinity_lab_enabled,
+            "openai_fallback": bool(settings.openai_api_key),
+            "whatsapp": settings.delivery_whatsapp_enabled,
+            "reprocess_auto": settings.reprocess_ready,
+        },
+        "scheduler": {
+            "enabled": settings.scheduler_enabled,
+            "slots": [f"{h:02d}:{m:02d}" for h, m in horarios_relatorio()],
+            "timezone": settings.report_timezone,
+        },
+        "chatwoot": {
+            "silence_min": settings.chatwoot_silence_minutes,
+            "only_today": settings.chatwoot_only_today,
+            "contas": len(contas),
+            "contas_com_inbox": sum(1 for c in contas if c.get("inbox_ids")),
+            "poll_seconds": settings.chatwoot_poll_seconds,
+        },
+        "ultimo_relatorio": {
+            "salvo_em": ultimo.get("salvo_em"),
+            "stamp": ultimo.get("stamp"),
+            "rotulo": ultimo.get("rotulo"),
+            "alertas": (snap.get("alertas") or [])[:12],
+            "fontes_snap": snap.get("fontes"),
+        },
+    }
+
+
+@app.get("/ops/metrics")
+async def ops_metrics() -> dict[str, Any]:
+    return metrics.snapshot()
+
+
+@app.get("/ops/live")
+async def ops_live() -> dict[str, Any]:
+    """Snapshots cacheados: Chatwoot (leads), WAHA (ruins), Hub (problemas)."""
+    return {
+        "ok": True,
+        "agora": datetime.now(timezone.utc).isoformat(),
+        "poll_hint": {
+            "ui_seconds": 8,
+            "waha_hub_seconds": settings.alert_poll_seconds,
+            "chatwoot_seconds": settings.chatwoot_poll_seconds,
+        },
+        **ops_cache.get_all(),
+    }
+
+
+_last_light_refresh: float = 0.0
+_light_lock: asyncio.Lock | None = None
+
+
+def _get_light_lock() -> asyncio.Lock:
+    global _light_lock
+    if _light_lock is None:
+        _light_lock = asyncio.Lock()
+    return _light_lock
+
+
+@app.post("/ops/refresh-live")
+async def ops_refresh_live() -> dict[str, Any]:
+    """Atualiza WAHA + Hub agora (leve). Debounce ~15s pra não martelar APIs."""
+    import time
+
+    global _last_light_refresh
+    async with _get_light_lock():
+        agora = time.monotonic()
+        skipped = agora - _last_light_refresh < 15.0
+        if not skipped:
+            _last_light_refresh = agora
+            try:
+                from app.collectors import waha_health
+                from app.collectors.painel import coletar_overview_leve
+
+                if settings.waha_health_enabled:
+                    wr = await waha_health.coletar()
+                    if wr["status"] == "ok":
+                        ops_cache.set_waha(wr["dados"] or {}, status="ok")
+                    else:
+                        ops_cache.set_waha({"totais": {}, "ruins": []}, status=wr["status"])
+                if settings.painel_enabled:
+                    pr = await coletar_overview_leve()
+                    if pr["status"] == "ok":
+                        ops_cache.set_painel(pr["dados"] or {}, status="ok")
+            except Exception as e:
+                logger.exception("refresh-live falhou")
+                raise HTTPException(500, str(e)) from e
+
+    return {
+        "ok": True,
+        "refreshed": not skipped,
+        "skipped_debounce": skipped,
+        **ops_cache.get_all(),
     }
 
 
@@ -90,7 +248,6 @@ async def relatorio_gerar(body: GerarBody | None = None) -> dict[str, Any]:
         logger.exception("falha ao gerar relatório")
         raise HTTPException(500, str(e)) from e
 
-    # Não devolve o snapshot inteiro na API por padrão (pode ser enorme).
     return {
         "ok": True,
         "paths": resultado["paths"],
@@ -117,15 +274,25 @@ async def relatorio_ultimo() -> dict[str, Any]:
 
 @app.get("/chatwoot/leads-silencio")
 async def chatwoot_leads_silencio() -> dict[str, Any]:
-    """Varre agora: leads >N min sem resposta, separados por elegível/pausado."""
     from app.collectors import chatwoot_health
 
     resultado = await chatwoot_health.coletar()
+    dados = resultado.get("dados") or {}
+    elegiveis = list(dados.get("leads_elegiveis_reprocessamento") or [])
+    if resultado["status"] == "ok":
+        ops_cache.set_chatwoot(dados, status="ok")
+    if resultado["status"] == "ok" and elegiveis:
+        metrics.record_reprocess(
+            kind="captured",
+            count=len(elegiveis),
+            status="api_manual",
+            detail="GET /chatwoot/leads-silencio",
+        )
     return {
         "status": resultado["status"],
         "fonte": resultado["fonte"],
         "coletado_em": resultado["coletado_em"],
-        "dados": resultado["dados"],
+        "dados": dados,
     }
 
 
@@ -135,7 +302,6 @@ class ReprocessBody(BaseModel):
 
 @app.post("/chatwoot/reprocessar")
 async def chatwoot_reprocessar(body: ReprocessBody | None = None) -> dict[str, Any]:
-    """Detecta silêncios e (opcionalmente) dispara o lote no sistema do Francisco."""
     from app.collectors import chatwoot_health
 
     body = body or ReprocessBody()
@@ -144,6 +310,13 @@ async def chatwoot_reprocessar(body: ReprocessBody | None = None) -> dict[str, A
         raise HTTPException(502, f"coleta chatwoot: {resultado['status']} — {resultado.get('dados')}")
 
     elegiveis = list((resultado["dados"] or {}).get("leads_elegiveis_reprocessamento") or [])
+    if elegiveis:
+        metrics.record_reprocess(
+            kind="captured",
+            count=len(elegiveis),
+            status="api_manual",
+            detail="POST /chatwoot/reprocessar",
+        )
     envio = None
     if body.enviar:
         envio = await enviar_lote(elegiveis)
@@ -157,13 +330,13 @@ async def chatwoot_reprocessar(body: ReprocessBody | None = None) -> dict[str, A
 
 class PerguntarBody(BaseModel):
     pergunta: str
-    thread_id: str = "ops"
+    thread_id: str = "ops-ui"
 
 
 @app.post("/perguntar")
 async def perguntar(body: PerguntarBody) -> dict[str, str]:
-    if not settings.openai_api_key:
-        raise HTTPException(503, "OPENAI_API_KEY ausente")
+    if not settings.openai_api_key and not settings.infinity_lab_enabled:
+        raise HTTPException(503, "configure Infinity Lab ou OPENAI_API_KEY")
     from app.agent.graph import perguntar as agent_perguntar
 
     try:

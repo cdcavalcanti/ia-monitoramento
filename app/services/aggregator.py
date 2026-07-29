@@ -245,6 +245,11 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
 
     snapshot: dict[str, Any] = {
         "gerado_em": datetime.now(timezone.utc).isoformat(),
+        "escopo": (
+            "Relatório consolidado do ecossistema Infinity: "
+            "Gestão (tarefas/atrasos/dev), Hub de Status (serviços/clientes), "
+            "WAHA (sessões WhatsApp), Chatwoot (silêncio IA / reprocess)."
+        ),
         "fontes": {
             "gestao": {"status": gestao["status"] if gestao else "ausente", "fonte": gestao["fonte"] if gestao else None},
             "painel": {"status": painel["status"] if painel else "ausente", "fonte": painel["fonte"] if painel else None},
@@ -258,6 +263,7 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
         "painel": None,
         "chatwoot": None,
         "waha": None,
+        "reprocessamento": None,
         "alertas": [],
     }
 
@@ -303,9 +309,11 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
             totais = (chatwoot["dados"] or {}).get("totais") or {}
             n_el = int(totais.get("elegiveis") or 0)
             n_pau = int(totais.get("pausados_com_silencio") or 0)
+            n_contas = int(totais.get("contas") or 0)
             if n_el > 0:
+                prefix = f"{n_contas} conta(s) cliente — " if n_contas else ""
                 snapshot["alertas"].append(
-                    f"{n_el} lead(s) sem resposta da IA (>threshold) elegíveis a reprocessar."
+                    f"{prefix}{n_el} lead(s) sem resposta da IA (>threshold) elegíveis a reprocessar."
                 )
             if n_pau > 0:
                 snapshot["alertas"].append(

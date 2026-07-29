@@ -1,11 +1,12 @@
 """Collector Chatwoot — silêncio da IA + candidatos a reprocessamento.
 
 Regra de negócio (determinística):
-  1. Conversas abertas (opcionalmente filtradas por inbox)
+  1. Conversas abertas nas inboxes das IAs (por conta cliente)
   2. Última mensagem do lead (incoming, não privada) há >= N minutos
   3. Sem resposta outgoing depois dela
-  4. Sem etiqueta de pausa (ex.: pausar_ia) → elegível
-  5. Com etiqueta de pausa → só reporta como "pausado, não reprocessar"
+  4. Último incoming é do dia corrente (America/Sao_Paulo) — não reprocessa legado
+  5. Sem etiqueta de pausa (ex.: pausar_ia) → elegível
+  6. Com etiqueta de pausa → só reporta como "pausado, não reprocessar"
 
 Causa raiz do erro: o Chatwoot sozinho quase nunca traz "por que a IA falhou".
 Só preenchemos causa_suspeita se houver label/nota/atributo explícito.
@@ -17,6 +18,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -29,6 +31,29 @@ FONTE = "chatwoot-ias"
 
 # Labels que indicam "humano/kill-switch — não mexer".
 PAUSE_LABEL_ALIASES_DEFAULT = ("pausar_ia", "pausar-ia", "pause_ia", "ia_pausada")
+
+
+def _tz_negocio(nome: str | None = None):
+    s = get_settings()
+    raw = (nome or s.report_timezone or "America/Sao_Paulo").strip()
+    try:
+        return ZoneInfo(raw)
+    except Exception:
+        try:
+            return ZoneInfo("America/Sao_Paulo")
+        except Exception:
+            # Windows sem tzdata: UTC-3 fixo (Brasil sem DST desde 2019).
+            from datetime import timedelta
+
+            return timezone(timedelta(hours=-3))
+
+
+def _eh_hoje(ts: datetime, *, agora: datetime, tz_name: str | None = None) -> bool:
+    """True se o timestamp cai no mesmo dia civil de `agora` no fuso do negócio."""
+    tz = _tz_negocio(tz_name)
+    local_ts = ts.astimezone(tz)
+    local_agora = agora.astimezone(tz)
+    return local_ts.date() == local_agora.date()
 
 
 class ChatwootHealthClient:
@@ -198,6 +223,21 @@ def _causa_suspeita(conv: dict[str, Any], mensagens: list[dict[str, Any]]) -> st
     return None
 
 
+def link_conversa(
+    base_url: str,
+    account_id: str | int,
+    inbox_id: str | int | None,
+    conversation_id: str | int,
+) -> str | None:
+    """URL no formato /app/accounts/{conta}/inbox/{caixa}/conversations/{id}."""
+    if inbox_id is None or conversation_id is None:
+        return None
+    base = str(base_url).rstrip("/")
+    return (
+        f"{base}/app/accounts/{account_id}/inbox/{inbox_id}/conversations/{conversation_id}"
+    )
+
+
 def montar_payload_reprocess(
     conv: dict[str, Any],
     *,
@@ -207,16 +247,24 @@ def montar_payload_reprocess(
     causa_suspeita: str | None,
     telefone: str,
     nome: str,
+    account_id: str | None = None,
+    account_nome: str | None = None,
+    base_url: str | None = None,
 ) -> dict[str, Any]:
     """Contrato estável pra o sistema do Francisco (ajustável quando o map chegar)."""
     cid = conv.get("id")
     meta = conv.get("meta") or {}
     sender = meta.get("sender") or {}
+    inbox_id = conv.get("inbox_id") or (conv.get("inbox") or {}).get("id")
+    aid = str(account_id) if account_id is not None else None
+    link = link_conversa(base_url or "", aid or "", inbox_id, cid) if aid and base_url else None
     return {
         "motivo": "silencio_ia",
         "regra": "lead_sem_resposta_ia_gt_threshold",
+        "account_id": aid,
+        "account_nome": account_nome,
         "conversation_id": cid,
-        "inbox_id": conv.get("inbox_id") or (conv.get("inbox") or {}).get("id"),
+        "inbox_id": inbox_id,
         "contact_id": sender.get("id") or conv.get("contact_id"),
         "telefone": telefone,
         "nome": nome,
@@ -227,6 +275,7 @@ def montar_payload_reprocess(
         "causa_suspeita": causa_suspeita,
         "causa_conhecida": causa_suspeita is not None,
         "status_conversa": conv.get("status"),
+        "link": link,
         "fonte": "chatwoot",
     }
 
@@ -238,8 +287,17 @@ def analisar_conversa(
     silencio_minutos: float,
     pause_labels: set[str],
     agora: datetime | None = None,
+    account_id: str | None = None,
+    account_nome: str | None = None,
+    base_url: str | None = None,
+    only_today: bool = True,
+    timezone_name: str | None = None,
 ) -> dict[str, Any] | None:
-    """Devolve candidato (pausado ou elegível) ou None se conversa ok / sem incoming."""
+    """Devolve candidato (pausado ou elegível) ou None se conversa ok / sem incoming.
+
+    Com only_today=True (default), ignora silêncios cujo último incoming
+    não é do dia corrente no fuso do negócio (REPORT_TIMEZONE).
+    """
     agora = agora or _agora()
     mensagens = [m for m in _as_msg_list(mensagens_payload) if _mensagem_relevante(m)]
     mensagens.sort(key=lambda m: _parse_ts(m.get("created_at") or m.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc))
@@ -254,6 +312,9 @@ def analisar_conversa(
 
     ts = _parse_ts(ultimo_incoming.get("created_at") or ultimo_incoming.get("timestamp"))
     if not ts:
+        return None
+
+    if only_today and not _eh_hoje(ts, agora=agora, tz_name=timezone_name):
         return None
 
     # houve outgoing depois do último incoming?
@@ -289,71 +350,199 @@ def analisar_conversa(
         causa_suspeita=causa,
         telefone=telefone,
         nome=nome,
+        account_id=account_id,
+        account_nome=account_nome,
+        base_url=base_url,
     )
+    payload["regra"] = "lead_sem_resposta_ia_gt_threshold_hoje" if only_today else payload["regra"]
+    payload["somente_hoje"] = bool(only_today)
     payload["elegivel_reprocessamento"] = not pausado
     return payload
 
 
-async def _varrer_candidatos(client: ChatwootHealthClient) -> dict[str, Any]:
-    s = get_settings()
-    silencio = float(s.chatwoot_silence_minutes)
-    pause_labels = set(s.pause_labels)
-    inbox = s.chatwoot_inbox_id or None
-    max_pages = max(1, int(s.chatwoot_max_pages))
-    max_convs = max(1, int(s.chatwoot_max_conversations))
-
+async def _varrer_conta(
+    client: ChatwootHealthClient,
+    *,
+    account_nome: str,
+    silencio: float,
+    pause_labels: set[str],
+    inbox_ids: list[str],
+    max_pages: int,
+    max_convs: int,
+    base_url: str,
+    only_today: bool,
+    timezone_name: str,
+) -> dict[str, Any]:
     elegiveis: list[dict[str, Any]] = []
     pausados: list[dict[str, Any]] = []
     analisadas = 0
     erros_msg = 0
+    erro_conta: str | None = None
 
-    for page in range(1, max_pages + 1):
-        raw = await client.listar_conversas(status="open", page=page, inbox_id=inbox)
-        convs = _as_conv_list(raw)
-        if not convs:
-            break
+    if not inbox_ids:
+        return {
+            "account_id": client.account_id,
+            "account_nome": account_nome,
+            "inbox_ids": [],
+            "conversas_analisadas": 0,
+            "erros_ao_ler_mensagens": 0,
+            "erro": "sem_inbox_ia_configurada",
+            "skipped": True,
+            "elegiveis": [],
+            "pausados": [],
+        }
 
-        for conv in convs:
+    try:
+        for inbox in inbox_ids:
             if analisadas >= max_convs:
                 break
-            cid = conv.get("id")
-            if cid is None:
-                continue
-            analisadas += 1
-            try:
-                msgs = await client.mensagens(cid)
-                item = analisar_conversa(
-                    conv,
-                    msgs,
-                    silencio_minutos=silencio,
-                    pause_labels=pause_labels,
-                )
-            except Exception:
-                erros_msg += 1
-                logger.warning("falha ao ler mensagens da conversa %s", cid, exc_info=True)
-                continue
+            for page in range(1, max_pages + 1):
+                if analisadas >= max_convs:
+                    break
+                raw = await client.listar_conversas(status="open", page=page, inbox_id=inbox)
+                convs = _as_conv_list(raw)
+                if not convs:
+                    break
 
-            if not item:
-                continue
-            if item.get("pausado"):
-                pausados.append(item)
-            else:
-                elegiveis.append(item)
+                for conv in convs:
+                    if analisadas >= max_convs:
+                        break
+                    cid = conv.get("id")
+                    if cid is None:
+                        continue
+                    if not conv.get("inbox_id"):
+                        conv = {**conv, "inbox_id": int(inbox) if str(inbox).isdigit() else inbox}
+                    analisadas += 1
+                    try:
+                        msgs = await client.mensagens(cid)
+                        item = analisar_conversa(
+                            conv,
+                            msgs,
+                            silencio_minutos=silencio,
+                            pause_labels=pause_labels,
+                            account_id=client.account_id,
+                            account_nome=account_nome,
+                            base_url=base_url,
+                            only_today=only_today,
+                            timezone_name=timezone_name,
+                        )
+                    except Exception:
+                        erros_msg += 1
+                        logger.warning(
+                            "falha ao ler mensagens conta=%s inbox=%s conversa=%s",
+                            client.account_id,
+                            inbox,
+                            cid,
+                            exc_info=True,
+                        )
+                        continue
 
-        if analisadas >= max_convs or len(convs) < 10:
-            # página curta: provavelmente acabou
-            if len(convs) < 5:
-                break
+                    if not item:
+                        continue
+                    if item.get("pausado"):
+                        pausados.append(item)
+                    else:
+                        elegiveis.append(item)
+
+                if len(convs) < 5:
+                    break
+    except Exception as e:
+        erro_conta = str(e)
+        logger.warning("falha ao varrer conta %s (%s): %s", account_nome, client.account_id, e)
+
+    return {
+        "account_id": client.account_id,
+        "account_nome": account_nome,
+        "inbox_ids": inbox_ids,
+        "conversas_analisadas": analisadas,
+        "erros_ao_ler_mensagens": erros_msg,
+        "erro": erro_conta,
+        "skipped": False,
+        "elegiveis": elegiveis,
+        "pausados": pausados,
+    }
+
+
+async def _varrer_candidatos() -> dict[str, Any]:
+    s = get_settings()
+    silencio = float(s.chatwoot_silence_minutes)
+    pause_labels = set(s.pause_labels)
+    max_pages = max(1, int(s.chatwoot_max_pages))
+    max_convs = max(1, int(s.chatwoot_max_conversations))
+    only_today = bool(s.chatwoot_only_today)
+    timezone_name = s.report_timezone
+    contas = s.chatwoot_account_list
+
+    elegiveis: list[dict[str, Any]] = []
+    pausados: list[dict[str, Any]] = []
+    por_conta: list[dict[str, Any]] = []
+    analisadas = 0
+    erros_msg = 0
+    contas_ativas = 0
+    contas_skipped = 0
+
+    for conta in contas:
+        client = ChatwootHealthClient(s.chatwoot_base_url, conta["id"], s.chatwoot_api_token)
+        inbox_ids = list(conta.get("inbox_ids") or [])
+        res = await _varrer_conta(
+            client,
+            account_nome=conta["nome"],
+            silencio=silencio,
+            pause_labels=pause_labels,
+            inbox_ids=inbox_ids,
+            max_pages=max_pages,
+            max_convs=max_convs,
+            base_url=s.chatwoot_base_url,
+            only_today=only_today,
+            timezone_name=timezone_name,
+        )
+        if res.get("skipped"):
+            contas_skipped += 1
+        else:
+            contas_ativas += 1
+        elegiveis.extend(res["elegiveis"])
+        pausados.extend(res["pausados"])
+        analisadas += int(res["conversas_analisadas"])
+        erros_msg += int(res["erros_ao_ler_mensagens"])
+        por_conta.append(
+            {
+                "account_id": res["account_id"],
+                "account_nome": res["account_nome"],
+                "inbox_ids": res.get("inbox_ids") or [],
+                "conversas_analisadas": res["conversas_analisadas"],
+                "elegiveis": len(res["elegiveis"]),
+                "pausados_com_silencio": len(res["pausados"]),
+                "erros_ao_ler_mensagens": res["erros_ao_ler_mensagens"],
+                "erro": res["erro"],
+                "skipped": bool(res.get("skipped")),
+            }
+        )
+        logger.info(
+            "conta %s (%s) inboxes=%s: analisadas=%s elegiveis=%s pausados=%s erro=%s",
+            conta["nome"],
+            conta["id"],
+            inbox_ids,
+            res["conversas_analisadas"],
+            len(res["elegiveis"]),
+            len(res["pausados"]),
+            res["erro"],
+        )
 
     elegiveis.sort(key=lambda x: float(x.get("minutos_sem_resposta") or 0), reverse=True)
     return {
         "silencio_minutos": silencio,
+        "somente_hoje": only_today,
+        "timezone": timezone_name,
         "pause_labels": sorted(pause_labels),
+        "contas": por_conta,
         "conversas_analisadas": analisadas,
         "erros_ao_ler_mensagens": erros_msg,
         "leads_elegiveis_reprocessamento": elegiveis,
         "leads_pausados_ignorados": pausados,
         "totais": {
+            "contas": len(contas),
+            "contas_ativas": contas_ativas,
+            "contas_sem_inbox": contas_skipped,
             "elegiveis": len(elegiveis),
             "pausados_com_silencio": len(pausados),
         },
@@ -374,19 +563,16 @@ async def coletar() -> ColetaResult:
             "(CHATWOOT_HEALTH_ENABLED=false). Credenciais + token necessários.",
         )
 
-    if not (s.chatwoot_base_url and s.chatwoot_api_token and s.chatwoot_account_id):
+    contas = s.chatwoot_account_list
+    if not (s.chatwoot_base_url and s.chatwoot_api_token and contas):
         return resultado_erro(
             FONTE,
-            "CHATWOOT_HEALTH_ENABLED=true mas faltam BASE_URL / ACCOUNT_ID / API_TOKEN",
+            "CHATWOOT_HEALTH_ENABLED=true mas faltam BASE_URL / API_TOKEN / "
+            "CHATWOOT_ACCOUNTS (ou CHATWOOT_ACCOUNT_ID)",
         )
 
-    client = ChatwootHealthClient(
-        s.chatwoot_base_url,
-        s.chatwoot_account_id,
-        s.chatwoot_api_token,
-    )
     try:
-        dados = await _varrer_candidatos(client)
+        dados = await _varrer_candidatos()
         return resultado_ok(FONTE, dados)
     except Exception as e:
         logger.exception("chatwoot health falhou")

@@ -32,8 +32,10 @@ class WahaClient:
         self.timeout = timeout
 
     def _headers(self) -> dict[str, str]:
+        # WAHA usa X-Api-Key (Bearer sozinho retorna 401 neste cluster).
         return {
             "Accept": "application/json",
+            "X-Api-Key": self.token,
             "Authorization": f"Bearer {self.token}",
         }
 

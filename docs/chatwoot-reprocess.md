@@ -2,11 +2,18 @@
 
 ## O que este bot já faz
 
-1. Lê conversas abertas no Chatwoot.
+1. Lê conversas abertas nas **contas dos clientes** (`CHATWOOT_ACCOUNTS`).
 2. Detecta lead com última mensagem **incoming** há **>= 5 min** sem **outgoing** depois.
-3. Se tem etiqueta `pausar_ia` (ou aliases) → **não reprocessa**, só reporta.
-4. Se elegível → monta payload e (quando ligado) POST no sistema do Francisco.
-5. Poller a cada `CHATWOOT_POLL_SECONDS` (default 60s) + seção no relatório diário.
+3. Só considera se o último incoming é **do dia corrente** (`America/Sao_Paulo` / `REPORT_TIMEZONE`). Dias anteriores são ignorados.
+4. Se tem etiqueta `pausar_ia` (ou aliases) → **não reprocessa**, só reporta.
+5. Se elegível → monta payload (com `account_id`, `inbox_id`, `link`) e (quando ligado) POST no Francisco.
+6. Poller a cada `CHATWOOT_POLL_SECONDS` (default 60s) + seção no relatório diário.
+
+Contas atuais (formato `Nome:accountId:inbox+inbox`). Sem inbox = skip até configurar:
+tecnodiesel 34 (sem), AIASSOC 31→222+199, Hollytec 30→198, Sua marca 29→214, Clinic+ 26→165+186, Vai xorá 21→143, akila 20→118, espaço infinity 19→81, hile 18→77, astro 17→64+144, transfast 15 (sem), borelli 9→136, light 8→230, RHT 6→70, Infinity 1→112+113.
+
+Link: `https://chat.iainfinity.com.br/app/accounts/{account_id}/inbox/{inbox_id}/conversations/{conversation_id}`
+
 
 ## Resposta à dúvida: dá pra saber o ERRO?
 
@@ -20,6 +27,24 @@
 
 Conclusão: o fluxo confiável é **detectar silêncio → filtrar pausa → reprocessar**.  
 Causa raiz só se o Francisco (ou a IA de atendimento) gravar isso em label/nota/log consultável.
+
+## Pausa: Chatwoot vs Supabase
+
+| Fonte | Papel no monitor |
+|-------|------------------|
+| Label Chatwoot `pausar_ia` | **Kill-switch oficial** para não reprocessar. Já cobrimos nas conversas **open**. |
+| Tabelas Supabase (`*_pausar_ia` etc.) | Estado interno de **cada IA de atendimento**. Não é necessário para a regra “não mexer no humano”. |
+
+**Gap real (bug de produto, não do Chatwoot sozinho):** ao **resolver/finalizar** a conversa, a label/pausa no Supabase frequentemente **não é limpa**. A IA de atendimento continua “pausada” no banco e o próximo contato não reativa.
+
+Onde corrigir de verdade: webhook/`conversation_status_changed=resolved` na IA de atendimento → remover `pausar_ia` no Chatwoot **e** apagar/desativar a linha no Supabase.
+
+O que o monitor pode fazer a mais (opcional):
+
+1. **Sem Supabase:** varrer conversas `resolved`/`all` que ainda tenham `pausar_ia` → alerta “pausa órfã pós-finalização”.
+2. **Com Supabase:** cruzar telefone/`contact_id` pausado no banco × status da conversa no Chatwoot → gap “pausado no Supa + conversa já resolvida”.
+
+Supabase no monitor só vale a pena se tivermos URL/keys (ou view única) das pausas por cliente; senão Chatwoot label + alerta de órfãos já fecha o gap de relatório.
 
 ## Payload que enviamos ao Francisco (contrato atual)
 

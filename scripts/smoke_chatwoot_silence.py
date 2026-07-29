@@ -30,15 +30,64 @@ def main() -> None:
             {"id": 1, "message_type": 0, "private": False, "content": "oi", "created_at": _ts(12)},
         ]
     }
-    item = analisar_conversa(conv, msgs_silencio, silencio_minutos=5, pause_labels={"pausar_ia"})
-    assert item is not None, "deveria detectar silêncio"
+    item = analisar_conversa(
+        conv,
+        msgs_silencio,
+        silencio_minutos=5,
+        pause_labels={"pausar_ia"},
+        only_today=True,
+        timezone_name="America/Sao_Paulo",
+    )
+    assert item is not None, "deveria detectar silêncio de hoje"
     assert item["elegivel_reprocessamento"] is True
     assert item["pausado"] is False
+    assert item["somente_hoje"] is True
     assert item["causa_suspeita"] is None
     assert item["telefone"].endswith("99999999")
 
+    # Mensagem de ontem: com only_today não entra
+    msgs_ontem = {
+        "payload": [
+            {
+                "id": 1,
+                "message_type": 0,
+                "private": False,
+                "content": "oi",
+                "created_at": _ts(60 * 30),  # ~30h atrás
+            },
+        ]
+    }
+    assert (
+        analisar_conversa(
+            conv,
+            msgs_ontem,
+            silencio_minutos=5,
+            pause_labels={"pausar_ia"},
+            only_today=True,
+            timezone_name="America/Sao_Paulo",
+        )
+        is None
+    ), "silêncio de dia anterior deve ser ignorado"
+
+    # Sem filtro de dia, legado ainda pode ser elegível
+    item_legado = analisar_conversa(
+        conv,
+        msgs_ontem,
+        silencio_minutos=5,
+        pause_labels={"pausar_ia"},
+        only_today=False,
+    )
+    assert item_legado is not None
+    assert item_legado["somente_hoje"] is False
+
     conv_pausa = {**conv, "labels": ["pausar_ia"]}
-    item_p = analisar_conversa(conv_pausa, msgs_silencio, silencio_minutos=5, pause_labels={"pausar_ia"})
+    item_p = analisar_conversa(
+        conv_pausa,
+        msgs_silencio,
+        silencio_minutos=5,
+        pause_labels={"pausar_ia"},
+        only_today=True,
+    )
     assert item_p is not None
     assert item_p["pausado"] is True
     assert item_p["elegivel_reprocessamento"] is False

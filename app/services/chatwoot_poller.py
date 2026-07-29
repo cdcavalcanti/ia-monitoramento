@@ -11,6 +11,7 @@ import logging
 
 from app.collectors import chatwoot_health
 from app.config import get_settings
+from app.services import metrics, ops_cache
 from app.services.reprocess import enviar_lote
 
 logger = logging.getLogger("monitor.chatwoot_poller")
@@ -41,8 +42,8 @@ async def _tick() -> None:
     s = get_settings()
     if not s.chatwoot_health_enabled:
         return
-    if not (s.chatwoot_base_url and s.chatwoot_api_token and s.chatwoot_account_id):
-        logger.warning("poller: credenciais Chatwoot incompletas")
+    if not (s.chatwoot_base_url and s.chatwoot_api_token and s.chatwoot_account_list):
+        logger.warning("poller: credenciais Chatwoot incompletas (BASE_URL/TOKEN/ACCOUNTS)")
         return
 
     resultado = await chatwoot_health.coletar()
@@ -53,12 +54,29 @@ async def _tick() -> None:
     dados = resultado["dados"]
     elegiveis = list(dados.get("leads_elegiveis_reprocessamento") or [])
     tot = dados.get("totais") or {}
+    ops_cache.set_chatwoot(dados, status="ok")
     logger.info(
         "poller: analisadas=%s elegiveis=%s pausados=%s",
         dados.get("conversas_analisadas"),
         tot.get("elegiveis"),
         tot.get("pausados_com_silencio"),
     )
+    metrics.heartbeat(
+        "chatwoot_poller",
+        "ok",
+        {
+            "analisadas": dados.get("conversas_analisadas"),
+            "elegiveis": tot.get("elegiveis"),
+            "pausados": tot.get("pausados_com_silencio"),
+        },
+    )
+    if elegiveis:
+        metrics.record_reprocess(
+            kind="captured",
+            count=len(elegiveis),
+            status="detected",
+            detail=f"somente_hoje={dados.get('somente_hoje')}",
+        )
 
     if elegiveis:
         envio = await enviar_lote(elegiveis)

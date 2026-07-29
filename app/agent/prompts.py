@@ -53,10 +53,17 @@ Se ok: liste sessões WORKING vs ruins. Se stub: diga que o monitor de sessões 
 ## 4. Chatwoot / IAs de atendimento
 Se status stub/erro: diga isso em 1–2 linhas.
 Se ok:
-- quantos leads elegíveis a reprocessar (silêncio > threshold, sem pausar_ia)
+- quantos leads elegíveis a reprocessar (silêncio > threshold, só incoming de HOJE, sem pausar_ia)
 - quantos pausados com silêncio (não reprocessar)
-- liste telefone/nome/conversation_id/minutos e causa_suspeita SE existir
+- liste telefone/nome/conversation_id/minutos/link e causa_suspeita SE existir
 - deixe claro quando causa_conhecida=false (não inventar o erro)
+- por conta cliente (totais), se vier no snapshot
+
+## 4.1 Reprocessamento
+Use o bloco `reprocessamento` do snapshot:
+- se automatico_habilitado=false: diga claramente que a DETECÇÃO está ativa mas o ENVIO automático ao Francisco ainda está desligado
+- informe elegiveis_detectados, status do lote (stub/ok/erro/vazio) e enviados/pulados
+- NÃO diga que reprocessou de verdade se status=stub
 
 ## 5. Ações recomendadas para hoje
 Lista priorizada (P0/P1/P2) e concreta. Só ações derivadas do snapshot.
