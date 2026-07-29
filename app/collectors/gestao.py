@@ -94,17 +94,31 @@ def _as_list(payload: Any) -> list[dict[str, Any]]:
 
 
 def coluna_tarefa(tarefa: dict[str, Any]) -> str:
-    return str(tarefa.get("coluna") or tarefa.get("status") or "").strip()
+    """Retorna o id canônico da coluna do kanban (ex.: atrasado, hoje, entregues).
+
+    A API do Gestão devolve `coluna` como objeto `{id, rotulo}` — não como string.
+    """
+    raw = tarefa.get("coluna") if tarefa.get("coluna") is not None else tarefa.get("status")
+    if isinstance(raw, dict):
+        return str(raw.get("id") or raw.get("rotulo") or raw.get("nome") or "").strip()
+    return str(raw or "").strip()
+
+
+def coluna_rotulo(tarefa: dict[str, Any]) -> str:
+    raw = tarefa.get("coluna") if tarefa.get("coluna") is not None else tarefa.get("status")
+    if isinstance(raw, dict):
+        return str(raw.get("rotulo") or raw.get("id") or raw.get("nome") or "").strip()
+    return str(raw or "").strip()
 
 
 def tarefa_atrasada(tarefa: dict[str, Any]) -> bool:
+    """Só conta o que está na coluna ATRASADO do Gestão — igual ao painel.
+
+    NÃO use diasAtraso sozinho: tarefas Em Entregues ainda carregam diasAtraso
+    histórico e inflavam o total (ex.: 552 vs 7 reais).
+    """
     col = coluna_tarefa(tarefa).lower()
-    if col == "atrasado":
-        return True
-    try:
-        return int(tarefa.get("diasAtraso") or tarefa.get("dias_atraso") or 0) > 0
-    except (TypeError, ValueError):
-        return False
+    return col in {"atrasado", "atrasados", "atrasada"}
 
 
 async def coletar() -> ColetaResult:

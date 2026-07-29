@@ -12,50 +12,52 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.collectors.base import ColetaResult
-from app.collectors.gestao import coluna_tarefa, tarefa_atrasada
+from app.collectors.gestao import coluna_rotulo, coluna_tarefa, tarefa_atrasada
 
 
-# Colunas que indicam trabalho em andamento (heurística; o front é a fonte).
-COLUNAS_EM_DESENVOLVIMENTO = {
-    "desenvolvimento",
-    "desenvolv.",
-    "em desenvolvimento",
-    "produção",
-    "producao",
-    "andamento",
-    "mapeamento",
-    "validação",
-    "validacao",
-}
+# Colunas do kanban Gestão (id da API) — espelha o painel.
+COLUNA_ATRASADO = {"atrasado", "atrasados", "atrasada"}
+COLUNA_HOJE = {"hoje"}
+COLUNA_AMANHA = {"amanha", "amanhã"}
+COLUNA_SEMANA = {"semana"}
+COLUNA_AGUARDANDO = {"aguardando"}
+COLUNA_VALIDACAO = {"validacao", "validação"}
+COLUNA_ACOMPANHAMENTO = {"acompanhamento"}
+COLUNA_ENTRADA = {"entrada", "programadas"}
+COLUNA_ENTREGUES = {"entregues", "descontinuadas"}
+
+
+
+def _nome_de_campo(val: Any, *keys: str) -> str:
+    if isinstance(val, dict):
+        for k in keys or ("nome", "name", "titulo", "label", "id"):
+            if val.get(k) not in (None, ""):
+                return str(val.get(k))
+        return str(val)
+    if val is None:
+        return "?"
+    return str(val)
 
 
 def _nome_cliente(t: dict[str, Any]) -> str:
-    return str(
-        t.get("cliente")
-        or t.get("clienteNome")
-        or t.get("nomeCliente")
-        or t.get("cliente_nome")
-        or "?"
-    )
+    for key in ("cliente", "clienteNome", "nomeCliente", "cliente_nome"):
+        if t.get(key) is not None:
+            return _nome_de_campo(t.get(key), "nome", "name", "titulo", "id")
+    return "?"
 
 
 def _nome_projeto(t: dict[str, Any]) -> str:
-    return str(
-        t.get("projeto")
-        or t.get("projetoNome")
-        or t.get("nomeProjeto")
-        or t.get("projeto_nome")
-        or "?"
-    )
+    for key in ("projeto", "projetoNome", "nomeProjeto", "projeto_nome"):
+        if t.get(key) is not None:
+            return _nome_de_campo(t.get(key), "nome", "name", "titulo", "id")
+    return "?"
 
 
 def _responsavel(t: dict[str, Any]) -> str:
-    return str(
-        t.get("responsavel")
-        or t.get("responsavelNome")
-        or t.get("assignee")
-        or "?"
-    )
+    for key in ("responsavel", "responsavelNome", "assignee"):
+        if t.get(key) is not None:
+            return _nome_de_campo(t.get(key), "nome", "name", "titulo", "id")
+    return "?"
 
 
 def _titulo(t: dict[str, Any]) -> str:
@@ -69,6 +71,7 @@ def _resumo_tarefa(t: dict[str, Any]) -> dict[str, Any]:
         "projeto": _nome_projeto(t),
         "responsavel": _responsavel(t),
         "coluna": coluna_tarefa(t),
+        "coluna_rotulo": coluna_rotulo(t),
         "diasAtraso": t.get("diasAtraso") or t.get("dias_atraso") or 0,
         "resumoStatus": t.get("resumoStatus") or t.get("resumo_status") or "",
         "prazo": t.get("prazo") or t.get("dataPrazo") or t.get("due_date") or "",
@@ -82,45 +85,51 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
     planejamentos: list[dict[str, Any]] = list(dados.get("planejamentos") or [])
 
     por_coluna: Counter[str] = Counter()
+    por_coluna_id: Counter[str] = Counter()
     atrasadas: list[dict[str, Any]] = []
     em_dev: list[dict[str, Any]] = []
     vencendo_hoje: list[dict[str, Any]] = []
+    vencendo_amanha: list[dict[str, Any]] = []
+    vencendo_semana: list[dict[str, Any]] = []
     aguardando_cliente: list[dict[str, Any]] = []
+    entrada: list[dict[str, Any]] = []
+    acompanhamento: list[dict[str, Any]] = []
     concluidas_com_resumo: list[dict[str, Any]] = []
 
     atrasos_por_cliente: dict[str, list[dict[str, Any]]] = defaultdict(list)
     atrasos_por_resp: Counter[str] = Counter()
 
     for t in tarefas:
-        col = coluna_tarefa(t)
-        col_l = col.lower()
-        por_coluna[col or "(sem coluna)"] += 1
+        col_id = coluna_tarefa(t).lower()
+        col_label = coluna_rotulo(t) or col_id or "(sem coluna)"
+        por_coluna[col_label] += 1
+        por_coluna_id[col_id or "(sem)"] += 1
+        item = _resumo_tarefa(t)
 
-        if tarefa_atrasada(t):
-            item = _resumo_tarefa(t)
+        if tarefa_atrasada(t) or col_id in COLUNA_ATRASADO:
             atrasadas.append(item)
             atrasos_por_cliente[_nome_cliente(t)].append(item)
             atrasos_por_resp[_responsavel(t)] += 1
 
-        if any(k in col_l for k in COLUNAS_EM_DESENVOLVIMENTO) or "desenvolv" in col_l:
-            em_dev.append(_resumo_tarefa(t))
-
-        if "vencimento hoje" in col_l or col_l == "hoje":
-            vencendo_hoje.append(_resumo_tarefa(t))
-
-        if "aguardando cliente" in col_l:
-            aguardando_cliente.append(_resumo_tarefa(t))
+        if col_id in COLUNA_HOJE:
+            vencendo_hoje.append(item)
+        if col_id in COLUNA_AMANHA:
+            vencendo_amanha.append(item)
+        if col_id in COLUNA_SEMANA:
+            vencendo_semana.append(item)
+        if col_id in COLUNA_AGUARDANDO:
+            aguardando_cliente.append(item)
+        if col_id in COLUNA_ENTRADA:
+            entrada.append(item)
+        if col_id in COLUNA_ACOMPANHAMENTO:
+            acompanhamento.append(item)
+        if col_id in COLUNA_VALIDACAO or "desenvolv" in col_id:
+            em_dev.append(item)
 
         resumo = t.get("resumoStatus") or t.get("resumo_status")
-        if resumo:
-            concluidas_com_resumo.append(
-                {
-                    **_resumo_tarefa(t),
-                    "resumoStatus": str(resumo)[:500],
-                }
-            )
+        if resumo and col_id in COLUNA_ENTREGUES:
+            concluidas_com_resumo.append({**item, "resumoStatus": str(resumo)[:500]})
 
-    # Ordena atrasos: mais dias primeiro.
     def _dias(x: dict[str, Any]) -> int:
         try:
             return int(x.get("diasAtraso") or 0)
@@ -183,13 +192,29 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
         "totais": {
             "tarefas": len(tarefas),
             "atrasadas": len(atrasadas),
+            "entrada": len(entrada),
+            "acompanhamento": len(acompanhamento),
             "em_desenvolvimento": len(em_dev),
             "vencimento_hoje": len(vencendo_hoje),
+            "vencimento_amanha": len(vencendo_amanha),
+            "vencimento_semana": len(vencendo_semana),
             "aguardando_cliente": len(aguardando_cliente),
             "clientes": len(clientes),
             "com_resumo_status": len(concluidas_com_resumo),
+            "kanban": {
+                "entrada": int(por_coluna_id.get("entrada") or 0),
+                "acompanhamento": int(por_coluna_id.get("acompanhamento") or 0),
+                "atrasado": int(por_coluna_id.get("atrasado") or 0),
+                "hoje": int(por_coluna_id.get("hoje") or 0),
+                "amanha": int(por_coluna_id.get("amanha") or 0),
+                "semana": int(por_coluna_id.get("semana") or 0),
+                "validacao": int(por_coluna_id.get("validacao") or 0),
+                "aguardando": int(por_coluna_id.get("aguardando") or 0),
+                "entregues": int(por_coluna_id.get("entregues") or 0),
+            },
         },
         "por_coluna": dict(por_coluna.most_common()),
+        "por_coluna_id": dict(por_coluna_id.most_common()),
         "atrasadas_top": atrasadas[:40],
         "atrasos_por_cliente": {
             k: v[:15] for k, v in sorted(atrasos_por_cliente.items(), key=lambda kv: -len(kv[1]))[:20]
@@ -197,6 +222,8 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
         "atrasos_por_responsavel": dict(atrasos_por_resp.most_common(20)),
         "em_desenvolvimento_amostra": em_dev[:30],
         "vencimento_hoje": vencendo_hoje[:20],
+        "vencimento_amanha": vencendo_amanha[:20],
+        "vencimento_semana": vencendo_semana[:20],
         "aguardando_cliente": aguardando_cliente[:20],
         "resumos_recentes": concluidas_com_resumo[-25:],
         "clientes": clientes_risco,
@@ -271,7 +298,9 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
         snapshot["gestao"] = _agregar_gestao(gestao["dados"])
         tot = snapshot["gestao"]["totais"]
         if tot["atrasadas"] > 0:
-            snapshot["alertas"].append(f"{tot['atrasadas']} tarefa(s) atrasada(s) no Gestão.")
+            snapshot["alertas"].append(
+                f"{tot['atrasadas']} tarefa(s) na coluna Atrasado do Gestão (kanban)."
+            )
         if tot["vencimento_hoje"] > 0:
             snapshot["alertas"].append(f"{tot['vencimento_hoje']} tarefa(s) com vencimento hoje.")
     elif gestao:
@@ -287,16 +316,28 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
         elif painel["status"] == "ok":
             dados = painel["dados"] or {}
             tot = dados.get("totais") or {}
-            saude = tot.get("saudeGeral") or (dados.get("normalizado") or {}).get("saudeGeral")
+            saude = (
+                tot.get("saudeGeral")
+                or dados.get("saudeGeral")
+                or (dados.get("normalizado") or {}).get("saudeGeral")
+            )
             if saude:
                 snapshot["alertas"].append(f"Hub de Status — saúde geral: {saude}.")
-            n_prob = int(tot.get("com_problema") or 0)
+            n_prob = int(tot.get("com_problema") or 0) or len(dados.get("servicos_problema") or [])
             if n_prob > 0:
                 snapshot["alertas"].append(f"{n_prob} item(ns) com problema no Hub (serviço/WAHA).")
-            n_cli = int(tot.get("clientes_problema") or 0)
+            clientes_p = dados.get("clientes_problema") or []
+            n_cli = int(tot.get("clientes_problema") or 0) or len(clientes_p)
             if n_cli > 0:
                 snapshot["alertas"].append(f"{n_cli} cliente(s) partial/offline no Hub.")
-            for a in (dados.get("alertas_api") or [])[:6]:
+            alertas_hub = list(dados.get("alertas_api") or [])
+            if not alertas_hub:
+                for a in dados.get("alertas") or []:
+                    if isinstance(a, dict):
+                        alertas_hub.append(a.get("texto") or a.get("log") or str(a))
+                    else:
+                        alertas_hub.append(str(a))
+            for a in alertas_hub[:8]:
                 snapshot["alertas"].append(f"Hub: {a}")
 
     if chatwoot:
@@ -328,7 +369,12 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
             snapshot["alertas"].append(f"WAHA com erro: {waha['dados'].get('erro')}")
         elif waha["status"] == "ok":
             tot = (waha["dados"] or {}).get("totais") or {}
+            n_ok = int(tot.get("working") or 0)
             n_ruim = int(tot.get("ruins") or 0)
+            n_tot = int(tot.get("total") or 0)
+            snapshot["alertas"].append(
+                f"WAHA: {n_ok} WORKING / {n_ruim} ruins / {n_tot} total."
+            )
             if n_ruim > 0:
                 snapshot["alertas"].append(f"{n_ruim} sessão(ões) WAHA fora de WORKING.")
 

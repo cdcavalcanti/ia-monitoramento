@@ -83,61 +83,20 @@ def _snapshot_json(snapshot: dict[str, Any]) -> str:
 
 
 async def sintetizar_relatorio(snapshot: dict[str, Any], *, conversation_id: str = "") -> str:
-    """Gera o Markdown do relatório a partir do snapshot agregado."""
-    s = get_settings()
-    user_content = build_user_prompt(_snapshot_json(snapshot))
-    conv = conversation_id or f"relatorio-{(snapshot.get('rotulo') or 'diario')}"
+    """Relatório diário: template determinístico (mesmos números do dash).
 
-    if s.infinity_lab_enabled:
-        try:
-            texto = await infinity_lab.chat(content=user_content, conversation_id=conv, purpose="relatorio")
-            if texto:
-                return texto
-        except Exception:
-            logger.exception("Infinity Lab falhou na síntese — tentando fallback")
+    Lab/OpenAI não recalculam totais — só poluem quando inventam. Mantemos
+    o Markdown estruturado a partir do snapshot agregado.
+    """
+    from app.services.report_md import montar_relatorio
 
-    if s.openai_api_key:
-        try:
-            msgs = [
-                SystemMessage(content=build_system_prompt()),
-                HumanMessage(content=user_content),
-            ]
-            resp = await _llm().ainvoke(msgs)
-            texto = (resp.content or "").strip() if isinstance(resp.content, str) else str(resp.content)
-            if texto:
-                usage = {}
-                meta = getattr(resp, "usage_metadata", None) or getattr(resp, "response_metadata", {}) or {}
-                if isinstance(meta, dict):
-                    usage = meta.get("token_usage") or meta.get("usage") or {}
-                    if not usage and ("input_tokens" in meta or "output_tokens" in meta):
-                        usage = meta
-                from app.services import metrics as metrics_svc
+    return montar_relatorio(snapshot)
 
-                metrics_svc.record_llm_from_texts(
-                    provider="openai",
-                    purpose="relatorio",
-                    prompt=user_content,
-                    completion=texto,
-                    usage=usage if isinstance(usage, dict) else {},
-                    ok=True,
-                )
-                return texto
-        except Exception:
-            logger.exception("OpenAI falhou na síntese — usando fallback estruturado")
-            try:
-                from app.services import metrics as metrics_svc
 
-                metrics_svc.record_llm_from_texts(
-                    provider="openai",
-                    purpose="relatorio",
-                    prompt=user_content,
-                    completion="",
-                    ok=False,
-                )
-            except Exception:
-                pass
+def _fallback_sem_llm(snapshot: dict[str, Any]) -> str:
+    from app.services.report_md import montar_relatorio
 
-    return _fallback_sem_llm(snapshot)
+    return montar_relatorio(snapshot)
 
 
 async def perguntar(thread_id: str, pergunta: str) -> str:
@@ -188,80 +147,3 @@ async def perguntar(thread_id: str, pergunta: str) -> str:
         if m.__class__.__name__ == "AIMessage" and isinstance(m.content, str) and m.content.strip():
             return m.content.strip()
     return "(sem resposta)"
-
-
-def _fallback_sem_llm(snapshot: dict[str, Any]) -> str:
-    """Sem Lab/OpenAI — relatório estruturado."""
-    alertas = snapshot.get("alertas") or []
-    fontes = snapshot.get("fontes") or {}
-    gestao = snapshot.get("gestao") or {}
-    totais = gestao.get("totais") if isinstance(gestao, dict) else None
-
-    linhas = [
-        "# Relatório diário — Infinity Monitor",
-        "",
-        f"_Gerado em {snapshot.get('gerado_em')}_",
-        "",
-        "## 1. Resumo executivo",
-    ]
-    if alertas:
-        linhas.extend(f"- {a}" for a in alertas)
-    else:
-        linhas.append("- Sem alertas registrados.")
-
-    linhas += ["", "## 2. Gestão Infinity — Projetos e tarefas"]
-    if totais:
-        linhas.append(
-            f"- Tarefas: {totais.get('tarefas')} | Atrasadas: {totais.get('atrasadas')} | "
-            f"Em dev: {totais.get('em_desenvolvimento')} | Vence hoje: {totais.get('vencimento_hoje')} | "
-            f"Aguardando cliente: {totais.get('aguardando_cliente')}"
-        )
-        for t in (gestao.get("atrasadas_top") or [])[:15]:
-            linhas.append(
-                f"- ATRASO: {t.get('cliente')} · {t.get('projeto')} · {t.get('titulo')} "
-                f"({t.get('responsavel')}, {t.get('diasAtraso')}d)"
-            )
-    elif isinstance(gestao, dict) and gestao.get("erro"):
-        linhas.append(f"- Erro na fonte: {gestao.get('erro')}")
-    else:
-        linhas.append("- Gestão indisponível ou sem dados.")
-
-    linhas += ["", "## 3. Hub de Status"]
-    painel = snapshot.get("painel") or {}
-    if isinstance(painel, dict):
-        tot_p = painel.get("totais") or {}
-        linhas.append(f"- Saúde geral: {tot_p.get('saudeGeral') or painel.get('aviso') or painel.get('erro') or '—'}")
-        for a in (painel.get("alertas_api") or [])[:8]:
-            linhas.append(f"- Hub: {a}")
-    else:
-        linhas.append(f"- {painel}")
-
-    linhas += ["", "## 4. Chatwoot / IAs de atendimento"]
-    cw = snapshot.get("chatwoot") or {}
-    if isinstance(cw, dict):
-        tot_c = cw.get("totais") or {}
-        linhas.append(
-            f"- Elegíveis reprocessar: {tot_c.get('elegiveis')} | "
-            f"Pausados: {tot_c.get('pausados_com_silencio')} | "
-            f"{cw.get('aviso') or cw.get('erro') or ''}"
-        )
-    else:
-        linhas.append(f"- {cw}")
-
-    linhas += ["", "## 5. Ações recomendadas para hoje"]
-    if totais and totais.get("atrasadas"):
-        linhas.append("- P0: Triar tarefas atrasadas listadas acima.")
-    if totais and totais.get("vencimento_hoje"):
-        linhas.append("- P0: Fechar ou renegociar itens com vencimento hoje.")
-    linhas.append("- P1: Revisar alertas do Hub de Status.")
-
-    linhas += ["", "## 6. Fontes e lacunas"]
-    for nome, info in fontes.items():
-        if isinstance(info, dict):
-            linhas.append(f"- {nome}: {info.get('status')}")
-
-    linhas += [
-        "",
-        "_Nota: sem Infinity Lab/OpenAI — relatório em modo fallback (sem síntese LLM)._",
-    ]
-    return "\n".join(str(x) for x in linhas)
