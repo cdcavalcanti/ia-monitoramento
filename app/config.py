@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     chatwoot_max_conversations: int = 80
     # Etiquetas que bloqueiam reprocessamento (separadas por vírgula).
     chatwoot_pause_labels: str = "pausar_ia,pausar-ia,pause_ia,ia_pausada"
+    # Etiquetas de handoff/agendamento — também NÃO são elegíveis a reprocessar.
+    chatwoot_skip_labels: str = (
+        "lead_agendado,transferido,atendimento_humano,humano,"
+        "handoff,agendado,consulta_agendada"
+    )
 
     # ---- Sistema de reprocessamento (Francisco) ----
     # Endpoints definitivos chegam com o mapeamento dele. Até lá: stub seguro.
@@ -81,6 +86,12 @@ class Settings(BaseSettings):
     # ---- alertas 24h (Painel + WAHA) ----
     alert_poller_enabled: bool = True
     alert_poll_seconds: float = 60.0
+    # WAHA: só alerta queda se ficar fora de WORKING por N segundos (anti flip-flop).
+    waha_alert_debounce_seconds: float = 300.0
+    # Resumo periódico no Zap com totais (0 = desliga). Default 2h.
+    waha_alert_digest_minutes: float = 120.0
+    # Se true, não manda WhatsApp a cada mudança STARTING/SCAN_QR/FAILED enquanto já está down.
+    waha_alert_only_working_edge: bool = True
 
     # ---- agendamento de RELATÓRIOS (não é o poller 24h) ----
     # Vários horários: "08:00,18:00"
@@ -128,6 +139,10 @@ class Settings(BaseSettings):
     @property
     def pause_labels(self) -> list[str]:
         return [x.strip() for x in str(self.chatwoot_pause_labels).split(",") if x.strip()]
+
+    @property
+    def skip_labels(self) -> list[str]:
+        return [x.strip() for x in str(self.chatwoot_skip_labels).split(",") if x.strip()]
 
     @property
     def chatwoot_account_list(self) -> list[dict]:

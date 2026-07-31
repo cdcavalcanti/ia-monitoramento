@@ -9,12 +9,15 @@ Cada item inclui `log` — motivo legível do porquê está na lista.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+
+logger = logging.getLogger("monitor.ops_cache")
 
 _lock = threading.Lock()
 _cache: dict[str, Any] = {
@@ -56,13 +59,55 @@ def load_disk() -> None:
         return
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            with _lock:
-                for k in ("chatwoot", "waha", "painel"):
-                    if data.get(k) is not None:
-                        _cache[k] = data[k]
+        if not isinstance(data, dict):
+            return
+        # Import tardio evita ciclo no boot.
+        from app.collectors.chatwoot_health import snapshot_eh_de_hoje
+
+        s = get_settings()
+        with _lock:
+            for k in ("chatwoot", "waha", "painel"):
+                if data.get(k) is not None:
+                    _cache[k] = data[k]
+            cw = _cache.get("chatwoot")
+            if isinstance(cw, dict) and cw.get("atualizado_em"):
+                if not snapshot_eh_de_hoje(cw.get("atualizado_em"), tz_name=s.report_timezone):
+                    logger.warning(
+                        "ops_cache chatwoot descartado (não é de hoje): %s",
+                        cw.get("atualizado_em"),
+                    )
+                    _cache["chatwoot"] = None
+                    try:
+                        _persist()
+                    except Exception:
+                        pass
     except Exception:
         pass
+
+
+def _sanear_chatwoot_view(cw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Garante que elegíveis expostos à UI/relatório sejam só do dia corrente."""
+    if not cw or not isinstance(cw, dict):
+        return cw
+    if not bool(cw.get("somente_hoje", True)):
+        return cw
+    from app.collectors.chatwoot_health import filtrar_leads_somente_hoje, snapshot_eh_de_hoje
+
+    s = get_settings()
+    if cw.get("atualizado_em") and not snapshot_eh_de_hoje(
+        cw.get("atualizado_em"), tz_name=s.report_timezone
+    ):
+        return None
+    elegiveis = list(cw.get("elegiveis") or [])
+    filtrados = filtrar_leads_somente_hoje(elegiveis, tz_name=s.report_timezone)
+    if len(filtrados) == len(elegiveis):
+        return cw
+    out = dict(cw)
+    out["elegiveis"] = filtrados
+    totais = dict(out.get("totais") or {})
+    totais["elegiveis"] = len(filtrados)
+    out["totais"] = totais
+    return out
 
 
 def _log_chatwoot_elegivel(x: dict[str, Any], *, silencio: float, somente_hoje: bool) -> str:
@@ -84,10 +129,16 @@ def _log_chatwoot_elegivel(x: dict[str, Any], *, silencio: float, somente_hoje: 
 
 def _log_chatwoot_pausado(x: dict[str, Any]) -> str:
     labels = x.get("labels") or []
-    lab = ", ".join(str(l) for l in labels[:6]) if labels else "pausar_ia"
+    lab = ", ".join(str(l) for l in labels[:6]) if labels else "pausa/skip"
+    motivo = x.get("motivo_bloqueio")
+    if motivo:
+        return (
+            f"Conversa bloqueada para reprocessamento ({motivo}). "
+            f"Silêncio há {x.get('minutos_sem_resposta')} min — não elegível."
+        )
     return (
-        f"Conversa com etiqueta de pausa ({lab}). "
-        "Atendimento humano ativo — a IA de monitoramento NÃO deve reprocessar. "
+        f"Conversa com etiqueta de pausa/handoff ({lab}). "
+        "Atendimento humano ou agendamento — a IA de monitoramento NÃO deve reprocessar. "
         f"Silêncio há {x.get('minutos_sem_resposta')} min."
     )
 
@@ -160,6 +211,7 @@ def set_chatwoot(dados: dict[str, Any], *, status: str = "ok") -> None:
                 "pausado": False,
                 "causa_suspeita": x.get("causa_suspeita"),
                 "ultimo_incoming_em": x.get("ultimo_incoming_em"),
+                "labels": x.get("labels") or [],
                 "log": _log_chatwoot_elegivel(x, silencio=silencio, somente_hoje=somente_hoje),
             }
         )
@@ -176,6 +228,8 @@ def set_chatwoot(dados: dict[str, Any], *, status: str = "ok") -> None:
                 "link": x.get("link"),
                 "pausado": True,
                 "labels": x.get("labels") or [],
+                "motivo_bloqueio": x.get("motivo_bloqueio"),
+                "ultimo_incoming_em": x.get("ultimo_incoming_em"),
                 "log": _log_chatwoot_pausado(x),
             }
         )
@@ -342,8 +396,9 @@ def set_painel(dados: dict[str, Any], *, status: str = "ok") -> None:
 
 def get_all() -> dict[str, Any]:
     with _lock:
+        cw = _cache.get("chatwoot")
         return {
-            "chatwoot": _cache.get("chatwoot"),
+            "chatwoot": _sanear_chatwoot_view(cw if isinstance(cw, dict) else None),
             "waha": _cache.get("waha"),
             "painel": _cache.get("painel"),
         }

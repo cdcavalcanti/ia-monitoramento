@@ -1,7 +1,6 @@
 # Infinity Lab — motor da IA de Monitoramento
 
-O bot **não** depende mais da OpenAI como caminho principal.
-A síntese do relatório e o Q&A usam o agente da plataforma:
+O bot usa o agente da plataforma para **enriquecer** o relatório:
 
 - Base: `https://infinity-lab.ai-infinity.io`
 - Agente: `c797df225afa` (IA de Monitoramento)
@@ -21,8 +20,9 @@ INFINITY_LAB_API_KEY=inf_...
 ## Fluxo
 
 1. Collectors agregam snapshot (Gestão / Hub / Chatwoot / WAHA)
-2. `infinity_lab.chat` envia o snapshot no `messages[].content`
-3. System prompt + conhecimento ficam **no agente do Lab**
-4. Resposta vem em JSON com campo `response`
+2. `montar_relatorio` gera a **base factual** (números oficiais, sem inventar)
+3. `infinity_lab.chat` recebe base + snapshot e **enriquece** em relatório consolidado
+4. Se Lab falhar (5xx/timeout) → OpenAI fallback → se falhar, usa a base factual
+5. PDF = Markdown da IA (`relatorio_para_pdf`) + KPIs determinísticos no topo
 
-`OPENAI_API_KEY` permanece só como fallback opcional.
+`OPENAI_API_KEY` permanece como fallback quando o Lab estiver fora.

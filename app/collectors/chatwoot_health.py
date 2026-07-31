@@ -5,8 +5,9 @@ Regra de negócio (determinística):
   2. Última mensagem do lead (incoming, não privada) há >= N minutos
   3. Sem resposta outgoing depois dela
   4. Último incoming é do dia corrente (America/Sao_Paulo) — não reprocessa legado
-  5. Sem etiqueta de pausa (ex.: pausar_ia) → elegível
-  6. Com etiqueta de pausa → só reporta como "pausado, não reprocessar"
+  5. Sem etiqueta de pausa/skip (ex.: pausar_ia, lead_agendado) → elegível
+  6. Com pausa, skip (agendado/transferido) ou activity de handoff → não reprocessar
+  7. Relatório/cache só usa snapshot do dia corrente
 
 Causa raiz do erro: o Chatwoot sozinho quase nunca traz "por que a IA falhou".
 Só preenchemos causa_suspeita se houver label/nota/atributo explícito.
@@ -54,6 +55,48 @@ def _eh_hoje(ts: datetime, *, agora: datetime, tz_name: str | None = None) -> bo
     local_ts = ts.astimezone(tz)
     local_agora = agora.astimezone(tz)
     return local_ts.date() == local_agora.date()
+
+
+def snapshot_eh_de_hoje(atualizado_em: Any, *, tz_name: str | None = None, agora: datetime | None = None) -> bool:
+    """True se o snapshot (ISO/`atualizado_em`) foi gerado no dia civil corrente."""
+    ts = _parse_ts(atualizado_em)
+    if not ts:
+        return False
+    return _eh_hoje(ts, agora=agora or _agora(), tz_name=tz_name)
+
+
+def filtrar_leads_somente_hoje(
+    leads: list[dict[str, Any]],
+    *,
+    tz_name: str | None = None,
+    agora: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Mantém só leads cujo ultimo_incoming_em é do dia corrente."""
+    agora = agora or _agora()
+    out: list[dict[str, Any]] = []
+    for lead in leads:
+        if not isinstance(lead, dict):
+            continue
+        ts = _parse_ts(lead.get("ultimo_incoming_em"))
+        if not ts:
+            continue
+        if _eh_hoje(ts, agora=agora, tz_name=tz_name):
+            out.append(lead)
+    return out
+
+
+# Palavras em activity/labels que indicam handoff humano ou agendamento.
+_HANDOFF_MARKERS = (
+    "lead_agendado",
+    "transfer",
+    "transferid",
+    "atribu",
+    "assigned",
+    "assumed control",
+    "atendimento_humano",
+    "handoff",
+    "consulta_agendada",
+)
 
 
 class ChatwootHealthClient:
@@ -143,6 +186,46 @@ def _tem_pausa(labels: list[str], pause_labels: set[str]) -> bool:
     normalizados = {l.lower().replace(" ", "_").replace("-", "_") for l in labels}
     alvos = {p.lower().replace(" ", "_").replace("-", "_") for p in pause_labels}
     return bool(normalizados & alvos)
+
+
+def _normalizar_label(lab: str) -> str:
+    return lab.lower().replace(" ", "_").replace("-", "_")
+
+
+def _tem_skip(labels: list[str], skip_labels: set[str]) -> bool:
+    if not skip_labels:
+        return False
+    normalizados = {_normalizar_label(l) for l in labels}
+    alvos = {_normalizar_label(p) for p in skip_labels}
+    return bool(normalizados & alvos)
+
+
+def _eh_activity(m: dict[str, Any]) -> bool:
+    mt = m.get("message_type")
+    if mt in (2, "2", "activity", "Activity"):
+        return True
+    return str(m.get("content_type") or "").lower() == "activity"
+
+
+def _teve_handoff(mensagens: list[dict[str, Any]], labels: list[str] | None = None) -> str | None:
+    """Retorna motivo curto se houver evidência de transferência/agendamento."""
+    for lab in labels or []:
+        low = _normalizar_label(lab)
+        for marker in _HANDOFF_MARKERS:
+            if marker in low:
+                return f"label:{lab}"
+
+    for m in mensagens:
+        if not _eh_activity(m) and not m.get("private"):
+            # activity e notas privadas; conteúdo público normal não conta
+            continue
+        content = str(m.get("content") or "").lower()
+        if not content:
+            continue
+        for marker in _HANDOFF_MARKERS:
+            if marker in content:
+                return f"activity:{content[:120]}"
+    return None
 
 
 def _as_msg_list(payload: Any) -> list[dict[str, Any]]:
@@ -292,14 +375,16 @@ def analisar_conversa(
     base_url: str | None = None,
     only_today: bool = True,
     timezone_name: str | None = None,
+    skip_labels: set[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Devolve candidato (pausado ou elegível) ou None se conversa ok / sem incoming.
+    """Devolve candidato (pausado/bloqueado ou elegível) ou None se conversa ok / sem incoming.
 
     Com only_today=True (default), ignora silêncios cujo último incoming
     não é do dia corrente no fuso do negócio (REPORT_TIMEZONE).
     """
     agora = agora or _agora()
-    mensagens = [m for m in _as_msg_list(mensagens_payload) if _mensagem_relevante(m)]
+    todas = _as_msg_list(mensagens_payload)
+    mensagens = [m for m in todas if _mensagem_relevante(m)]
     mensagens.sort(key=lambda m: _parse_ts(m.get("created_at") or m.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc))
 
     ultimo_incoming = None
@@ -330,7 +415,10 @@ def analisar_conversa(
         return None
 
     labels = _labels_de(conv)
+    skip = set(skip_labels or ())
     pausado = _tem_pausa(labels, pause_labels)
+    handoff = _teve_handoff(todas, labels)
+    bloqueado = pausado or _tem_skip(labels, skip) or bool(handoff)
     meta = conv.get("meta") or {}
     sender = meta.get("sender") or {}
     telefone = str(
@@ -341,12 +429,12 @@ def analisar_conversa(
     ).lstrip("+")
     nome = str(sender.get("name") or sender.get("available_name") or "")
 
-    causa = _causa_suspeita(conv, _as_msg_list(mensagens_payload))
+    causa = _causa_suspeita(conv, todas)
     payload = montar_payload_reprocess(
         conv,
         minutos_sem_resposta=minutos,
         ultimo_incoming_em=ts.isoformat(),
-        pausado=pausado,
+        pausado=bloqueado,
         causa_suspeita=causa,
         telefone=telefone,
         nome=nome,
@@ -356,7 +444,11 @@ def analisar_conversa(
     )
     payload["regra"] = "lead_sem_resposta_ia_gt_threshold_hoje" if only_today else payload["regra"]
     payload["somente_hoje"] = bool(only_today)
-    payload["elegivel_reprocessamento"] = not pausado
+    payload["elegivel_reprocessamento"] = not bloqueado
+    if handoff and not pausado:
+        payload["motivo_bloqueio"] = handoff
+    elif _tem_skip(labels, skip) and not pausado:
+        payload["motivo_bloqueio"] = "skip_label"
     return payload
 
 
@@ -366,6 +458,7 @@ async def _varrer_conta(
     account_nome: str,
     silencio: float,
     pause_labels: set[str],
+    skip_labels: set[str],
     inbox_ids: list[str],
     max_pages: int,
     max_convs: int,
@@ -420,6 +513,7 @@ async def _varrer_conta(
                             msgs,
                             silencio_minutos=silencio,
                             pause_labels=pause_labels,
+                            skip_labels=skip_labels,
                             account_id=client.account_id,
                             account_nome=account_nome,
                             base_url=base_url,
@@ -439,7 +533,7 @@ async def _varrer_conta(
 
                     if not item:
                         continue
-                    if item.get("pausado"):
+                    if item.get("pausado") or not item.get("elegivel_reprocessamento"):
                         pausados.append(item)
                     else:
                         elegiveis.append(item)
@@ -467,6 +561,7 @@ async def _varrer_candidatos() -> dict[str, Any]:
     s = get_settings()
     silencio = float(s.chatwoot_silence_minutes)
     pause_labels = set(s.pause_labels)
+    skip_labels = set(s.skip_labels)
     max_pages = max(1, int(s.chatwoot_max_pages))
     max_convs = max(1, int(s.chatwoot_max_conversations))
     only_today = bool(s.chatwoot_only_today)
@@ -489,6 +584,7 @@ async def _varrer_candidatos() -> dict[str, Any]:
             account_nome=conta["nome"],
             silencio=silencio,
             pause_labels=pause_labels,
+            skip_labels=skip_labels,
             inbox_ids=inbox_ids,
             max_pages=max_pages,
             max_convs=max_convs,
@@ -534,6 +630,7 @@ async def _varrer_candidatos() -> dict[str, Any]:
         "somente_hoje": only_today,
         "timezone": timezone_name,
         "pause_labels": sorted(pause_labels),
+        "skip_labels": sorted(skip_labels),
         "contas": por_conta,
         "conversas_analisadas": analisadas,
         "erros_ao_ler_mensagens": erros_msg,

@@ -70,6 +70,7 @@ async def chat(
     stream: bool = False,
     timeout: float = 180.0,
     purpose: str = "chat",
+    retries: int = 2,
 ) -> str:
     """Envia uma mensagem ao agente de monitoramento no Lab."""
     s = get_settings()
@@ -91,49 +92,67 @@ async def chat(
         "stream": stream,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, headers=headers, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-
-        texto = _extrair_texto(data)
-        usage = _extrair_usage(data)
-        if not texto:
-            logger.warning(
-                "resposta Lab sem texto parseável: keys=%s",
-                list(data.keys()) if isinstance(data, dict) else type(data),
-            )
-            metrics.record_llm_from_texts(
-                provider="infinity_lab",
-                purpose=purpose,
-                prompt=content,
-                completion="",
-                usage=usage,
-                ok=False,
-            )
-            raise RuntimeError("Infinity Lab retornou resposta vazia/inesperada")
-
-        metrics.record_llm_from_texts(
-            provider="infinity_lab",
-            purpose=purpose,
-            prompt=content,
-            completion=texto,
-            usage=usage,
-            ok=True,
-        )
-        return texto
-    except RuntimeError:
-        raise
-    except Exception:
+    last_exc: Exception | None = None
+    for attempt in range(max(1, retries + 1)):
         try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, headers=headers, json=body)
+                # 530/502/503: edge/origin instável — tenta de novo
+                if resp.status_code in (502, 503, 504, 520, 521, 522, 523, 524, 530) and attempt < retries:
+                    logger.warning(
+                        "Lab HTTP %s (tentativa %s/%s) — retry",
+                        resp.status_code,
+                        attempt + 1,
+                        retries + 1,
+                    )
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+
+            texto = _extrair_texto(data)
+            usage = _extrair_usage(data)
+            if not texto:
+                logger.warning(
+                    "resposta Lab sem texto parseável: keys=%s",
+                    list(data.keys()) if isinstance(data, dict) else type(data),
+                )
+                metrics.record_llm_from_texts(
+                    provider="infinity_lab",
+                    purpose=purpose,
+                    prompt=content,
+                    completion="",
+                    usage=usage,
+                    ok=False,
+                )
+                raise RuntimeError("Infinity Lab retornou resposta vazia/inesperada")
+
             metrics.record_llm_from_texts(
                 provider="infinity_lab",
                 purpose=purpose,
                 prompt=content,
-                completion="",
-                ok=False,
+                completion=texto,
+                usage=usage,
+                ok=True,
             )
-        except Exception:
-            pass
-        raise
+            return texto
+        except RuntimeError:
+            raise
+        except Exception as e:
+            last_exc = e
+            if attempt < retries and isinstance(e, (httpx.TimeoutException, httpx.TransportError)):
+                logger.warning("Lab rede/timeout (tentativa %s) — retry: %s", attempt + 1, e)
+                continue
+            try:
+                metrics.record_llm_from_texts(
+                    provider="infinity_lab",
+                    purpose=purpose,
+                    prompt=content,
+                    completion="",
+                    ok=False,
+                )
+            except Exception:
+                pass
+            raise
+
+    assert last_exc is not None
+    raise last_exc

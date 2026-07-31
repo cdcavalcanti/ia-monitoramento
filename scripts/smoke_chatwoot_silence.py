@@ -112,6 +112,47 @@ def main() -> None:
     assert item_e is not None
     assert item_e["causa_suspeita"] and "label:" in item_e["causa_suspeita"]
 
+    # lead_agendado / transferido → NÃO elegível
+    conv_agendado = {**conv, "labels": ["lead_agendado"]}
+    item_a = analisar_conversa(
+        conv_agendado,
+        msgs_silencio,
+        silencio_minutos=5,
+        pause_labels={"pausar_ia"},
+        skip_labels={"lead_agendado", "transferido"},
+        only_today=True,
+        timezone_name="America/Sao_Paulo",
+    )
+    assert item_a is not None
+    assert item_a["elegivel_reprocessamento"] is False
+    assert item_a["pausado"] is True
+
+    # Activity de handoff (mesmo sem label na conversa)
+    msgs_handoff = {
+        "payload": [
+            {"id": 1, "message_type": 0, "private": False, "content": "oi", "created_at": _ts(12)},
+            {
+                "id": 2,
+                "message_type": 2,
+                "private": False,
+                "content": "Acesso Infinity adicionou lead_agendado",
+                "created_at": _ts(11),
+            },
+        ]
+    }
+    item_h = analisar_conversa(
+        conv,
+        msgs_handoff,
+        silencio_minutos=5,
+        pause_labels={"pausar_ia"},
+        skip_labels={"lead_agendado"},
+        only_today=True,
+        timezone_name="America/Sao_Paulo",
+    )
+    assert item_h is not None
+    assert item_h["elegivel_reprocessamento"] is False
+    assert item_h.get("motivo_bloqueio")
+
     print("smoke_chatwoot_silence OK")
 
 

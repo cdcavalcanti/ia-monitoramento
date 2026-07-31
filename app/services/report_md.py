@@ -16,72 +16,213 @@ def _bullets(items: list[str], empty: str = "- (nenhum)") -> list[str]:
     return items if items else [empty]
 
 
+def criticidade_alerta(texto: str) -> int:
+    """Ordem: 0 vermelho → 1 laranja → 2 amarelo → 3 azul."""
+    t = str(texto).lower()
+    if any(
+        k in t
+        for k in (
+            "atrasad",
+            "fora de working",
+            " ruin",
+            "ruins",
+            "failed",
+            "erro",
+            "offline",
+            "crít",
+            "critico",
+            "crítica",
+        )
+    ):
+        return 0
+    if any(
+        k in t
+        for k in (
+            "elegív",
+            "elegiv",
+            "parcial",
+            "aten",
+            "problema",
+            "s/ resposta",
+            "sem resposta",
+            "reprocess",
+        )
+    ):
+        return 1
+    if any(k in t for k in ("vencimento hoje", "vence hoje", "vencendo hoje", "amanhã", "amanha")):
+        return 2
+    return 3
+
+
+def alerta_hub_waha_desatualizado(texto: str) -> bool:
+    """Hub às vezes diz 'WAHA não configurada' mesmo com sessões ok no monitor."""
+    t = str(texto).lower()
+    if "waha" not in t and "números (waha)" not in t and "numeros (waha)" not in t:
+        return False
+    return any(
+        k in t
+        for k in (
+            "não configur",
+            "nao configur",
+            "indispon",
+            "pendente",
+        )
+    )
+
+
+def ordenar_alertas_por_criticidade(alertas: list[Any]) -> list[str]:
+    textos = [str(a) for a in alertas if a is not None and str(a).strip()]
+    return sorted(textos, key=lambda a: (criticidade_alerta(a), a.lower()))
+
+
+def filtrar_alertas_hub(
+    alertas: list[Any],
+    *,
+    waha_ok: bool,
+) -> list[str]:
+    out: list[str] = []
+    for a in alertas:
+        texto = a.get("texto") or a.get("log") or str(a) if isinstance(a, dict) else str(a)
+        # Nunca levar alerta Hub de WAHA "não configurada" para o relatório.
+        if alerta_hub_waha_desatualizado(texto):
+            continue
+        if waha_ok and "waha" in str(texto).lower() and any(
+            k in str(texto).lower() for k in ("não configur", "nao configur", "pendente")
+        ):
+            continue
+        out.append(texto)
+    return out
+
+
 def montar_relatorio(snapshot: dict[str, Any]) -> str:
-    """Relatório escaneável, seções separadas, números do snapshot."""
-    alertas = list(snapshot.get("alertas") or [])
+    """Relatório consolidado (escaneável) — números do snapshot."""
+    from app.services.report_content import (
+        acoes_consolidadas,
+        atrasos_por_cliente_rows,
+        atrasos_por_resp_rows,
+        contas_cw_rows,
+        metricas_base,
+        panorama_paragrafos,
+        scorecard_dominios,
+        waha_por_status,
+    )
+
+    m = metricas_base(snapshot)
     fontes = snapshot.get("fontes") or {}
-    gestao = snapshot.get("gestao") if isinstance(snapshot.get("gestao"), dict) else {}
-    painel = snapshot.get("painel") if isinstance(snapshot.get("painel"), dict) else {}
-    cw = snapshot.get("chatwoot") if isinstance(snapshot.get("chatwoot"), dict) else {}
-    waha = snapshot.get("waha") if isinstance(snapshot.get("waha"), dict) else {}
+    gestao, painel, cw, waha = m["gestao"], m["painel"], m["cw"], m["waha"]
+    tot, kanban = m["tot"], m["kanban"]
     repro = snapshot.get("reprocessamento") if isinstance(snapshot.get("reprocessamento"), dict) else {}
-    tot = gestao.get("totais") if isinstance(gestao.get("totais"), dict) else {}
-    kanban = tot.get("kanban") if isinstance(tot.get("kanban"), dict) else {}
+    wt = m["wt"]
+
+    waha_ok = m["n_working"] > 0 or m["n_total_w"] > 0
+    alertas_raw = list(snapshot.get("alertas") or [])
+    alertas = [
+        a
+        for a in ordenar_alertas_por_criticidade(alertas_raw)
+        if not alerta_hub_waha_desatualizado(a)
+    ]
 
     linhas: list[str] = [
-        "# Relatório — Infinity Monitor",
+        "# Relatório consolidado — Infinity Monitor",
         "",
         f"_Gerado em {snapshot.get('gerado_em') or '—'} · rótulo: {snapshot.get('rotulo') or 'manual'}_",
         "",
         "---",
         "",
-        "## 1. Resumo executivo",
+        "## 1. Panorama consolidado",
         "",
     ]
+    for p in panorama_paragrafos(m):
+        linhas.append(p)
+        linhas.append("")
+
+    linhas += [
+        "### Scorecard por domínio",
+        "",
+        "| Domínio | Estado | Destaque |",
+        "| --- | --- | --- |",
+    ]
+    for row in scorecard_dominios(m):
+        linhas.append(f"| {row['dominio']} | **{row['estado']}** | {row['destaque']} |")
+
+    linhas += ["", "### Sinais por criticidade", ""]
     linhas.extend(_bullets([f"- {a}" for a in alertas[:12]], "- Sem alertas no snapshot."))
 
     # —— Gestão ——
+    from app.services.report_content import tabela_atrasos_detalhe
+
     linhas += ["", "---", "", "## 2. Gestão Infinity (kanban)", ""]
     if tot:
         linhas += [
-            "Contagens **por coluna do painel** (não usar diasAtraso de entregues):",
+            "Contagens **por coluna do painel**:",
             "",
             f"| Coluna | Qtd |",
             f"| --- | ---: |",
-            f"| Entrada de tarefas | {_n(kanban.get('entrada'), tot.get('entrada', 0))} |",
-            f"| Acompanhamento | {_n(kanban.get('acompanhamento'), tot.get('acompanhamento', 0))} |",
-            f"| **Atrasado** | **{_n(kanban.get('atrasado'), tot.get('atrasadas', 0))}** |",
-            f"| Vencimento hoje | {_n(kanban.get('hoje'), tot.get('vencimento_hoje', 0))} |",
-            f"| Vencimento amanhã | {_n(kanban.get('amanha'), tot.get('vencimento_amanha', 0))} |",
-            f"| Vencimento essa semana | {_n(kanban.get('semana'), tot.get('vencimento_semana', 0))} |",
+            f"| Entrada de tarefas | {_n(kanban.get('entrada'), 0)} |",
+            f"| Acompanhamento | {_n(kanban.get('acompanhamento'), 0)} |",
+            f"| **Atrasado** | **{m['n_atr']}** |",
+            f"| Vencimento hoje | {m['n_hoje']} |",
+            f"| Vencimento amanhã | {m['n_amanha']} |",
+            f"| Vencimento essa semana | {m['n_semana']} |",
             f"| Validação | {_n(kanban.get('validacao'), 0)} |",
-            f"| Aguardando cliente | {_n(kanban.get('aguardando'), tot.get('aguardando_cliente', 0))} |",
+            f"| Aguardando cliente | {m['n_aguard']} |",
             f"| Entregues (histórico) | {_n(kanban.get('entregues'), 0)} |",
             "",
             f"Total de tarefas na API: **{_n(tot.get('tarefas'))}**.",
             "",
-            "### Top atrasos (coluna Atrasado)",
+            "### Atrasos — detalhe (cliente · projeto · responsável · dias · motivo)",
             "",
         ]
-        tops = list(gestao.get("atrasadas_top") or [])[:10]
-        if tops:
-            for t in tops:
-                linhas.append(
-                    f"- {t.get('cliente')} · {t.get('projeto')} · {t.get('titulo')} "
-                    f"— {t.get('responsavel')} · {t.get('diasAtraso')}d"
-                )
+        atr_rows = tabela_atrasos_detalhe(gestao, limite=40)
+        if atr_rows:
+            # prioriza tabela sem motivo vazio ocupando coluna
+            tem_motivo = any(str(r[4]).strip() not in ("", "-", "—", "–") for r in atr_rows)
+            if tem_motivo:
+                linhas += [
+                    "| Cliente | Projeto | Responsável | Dias | Motivo | Tarefa |",
+                    "| --- | --- | --- | ---: | --- | --- |",
+                ]
+                for r in atr_rows:
+                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} | {r[5]} |")
+            else:
+                linhas += [
+                    f"**{m['n_atr']} atrasada(s)**",
+                    "",
+                    "| Cliente | Projeto | Responsável | Dias | Tarefa |",
+                    "| --- | --- | --- | ---: | --- |",
+                ]
+                for r in atr_rows:
+                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[5]} |")
+            linhas.append("")
+            linhas.append("_Motivo ainda não preenchido na Gestão (obrigatório em breve)._")
         else:
             linhas.append("- Nenhuma tarefa na coluna Atrasado.")
 
-        hoje = list(gestao.get("vencimento_hoje") or [])[:8]
-        linhas += ["", "### Vencimento hoje", ""]
-        if hoje:
-            for t in hoje:
+        linhas += ["", "### Concentração (resumo)", ""]
+        cli_rows = atrasos_por_cliente_rows(gestao, limite=8)
+        if cli_rows:
+            linhas += ["| Cliente | Qtd | Maior atraso |", "| --- | ---: | --- |"]
+            for r in cli_rows:
+                linhas.append(f"| {r[0]} | {r[1]} | {r[2]} |")
+        resp_rows = atrasos_por_resp_rows(gestao)
+        if resp_rows:
+            linhas += ["", "| Responsável | Qtd |", "| --- | ---: |"]
+            for r in resp_rows:
+                linhas.append(f"| {r[0]} | {r[1]} |")
+
+        linhas += ["", "### Acompanhamento — vence hoje / amanhã", ""]
+        for titulo, chave in (
+            ("Hoje", "vencimento_hoje"),
+            ("Amanhã", "vencimento_amanha"),
+        ):
+            itens = list(gestao.get(chave) or [])
+            linhas.append(f"- **{titulo}:** {len(itens)}")
+            for t in itens[:5]:
                 linhas.append(
-                    f"- {t.get('cliente')} · {t.get('titulo')} — {t.get('responsavel')}"
+                    f"  - {t.get('cliente')} · {t.get('projeto')} · {t.get('titulo')} — {t.get('responsavel')}"
                 )
-        else:
-            linhas.append("- Nenhum.")
+            if len(itens) > 5:
+                linhas.append(f"  - +{len(itens) - 5} no kanban")
     elif gestao.get("erro"):
         linhas.append(f"- Erro Gestão: {gestao.get('erro')}")
     else:
@@ -89,174 +230,155 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
 
     # —— Hub ——
     linhas += ["", "---", "", "## 3. Hub de Status", ""]
-    saude = (
-        (painel.get("totais") or {}).get("saudeGeral")
-        if isinstance(painel.get("totais"), dict)
-        else None
-    ) or painel.get("saudeGeral") or painel.get("aviso") or painel.get("erro") or "—"
-    linhas.append(f"**Saúde geral:** {saude}")
+    linhas.append(f"**Saúde geral:** {m['saude']}")
     linhas.append("")
 
-    alertas_hub = list(painel.get("alertas_api") or [])
-    if not alertas_hub and isinstance(painel.get("alertas"), list):
-        for a in painel["alertas"]:
-            if isinstance(a, dict):
-                alertas_hub.append(a.get("texto") or a.get("log") or str(a))
-            else:
-                alertas_hub.append(str(a))
+    alertas_hub_raw = list(painel.get("alertas_api") or [])
+    if not alertas_hub_raw and isinstance(painel.get("alertas"), list):
+        alertas_hub_raw = list(painel["alertas"])
+    alertas_hub = filtrar_alertas_hub(alertas_hub_raw, waha_ok=waha_ok)
     linhas.append("### Alertas do Hub")
     linhas.append("")
-    linhas.extend(_bullets([f"- {a}" for a in alertas_hub[:12]]))
+    if alertas_hub:
+        linhas.extend(_bullets([f"- {a}" for a in alertas_hub[:14]]))
+    else:
+        linhas.append("- Nenhum alerta relevante do Hub.")
 
-    servicos = list(painel.get("servicos_problema") or [])[:15]
+    servicos = [s for s in m["servicos"] if isinstance(s, dict)][:15]
     linhas += ["", "### Serviços com problema", ""]
     if servicos:
         for s in servicos:
-            if isinstance(s, dict):
-                linhas.append(
-                    f"- {s.get('nome')} · {s.get('tipo') or '—'} · "
-                    f"{s.get('status') or s.get('nivel') or 'problema'}"
-                )
-            else:
-                linhas.append(f"- {s}")
+            linhas.append(
+                f"- {s.get('nome')} · {s.get('tipo') or '—'} · "
+                f"{s.get('status') or s.get('nivel') or 'problema'}"
+            )
     else:
-        linhas.append("- Nenhum serviço crítico listado no cache.")
+        linhas.append("- Nenhum serviço crítico listado.")
 
-    clientes_p = list(
-        painel.get("clientes_problema") or painel.get("clientes_com_problema") or []
-    )[:15]
     linhas += ["", "### Clientes parcial / offline", ""]
-    if clientes_p:
-        for c in clientes_p:
+    if m["clientes_hub"]:
+        for c in m["clientes_hub"][:18]:
             if isinstance(c, dict):
                 linhas.append(
-                    f"- {c.get('nome') or c.get('cliente') or c} · {c.get('status') or c.get('estado') or 'parcial'}"
+                    f"- {c.get('nome') or c.get('cliente') or c} · "
+                    f"{c.get('status') or c.get('estado') or 'parcial'}"
                 )
             else:
                 linhas.append(f"- {c}")
     else:
         linhas.append("- Lista detalhada indisponível; ver alertas do Hub acima.")
 
-    if painel.get("atualizado_em") or painel.get("origem"):
-        linhas.append("")
-        linhas.append(
-            f"_Hub origem: {painel.get('origem') or 'coleta'} · "
-            f"atualizado {painel.get('atualizado_em') or '—'}_"
-        )
-
     # —— WAHA ——
     linhas += ["", "---", "", "## 4. WAHA (sessões WhatsApp)", ""]
-    wt = waha.get("totais") if isinstance(waha.get("totais"), dict) else {}
-    working = wt.get("working")
-    ruins = wt.get("ruins")
-    total = wt.get("total")
+    pct = round(100.0 * m["n_working"] / m["n_total_w"]) if m["n_total_w"] else 0
     linhas += [
-        f"- **WORKING:** {_n(working, '—')}",
-        f"- **Ruins / atenção:** {_n(ruins, '—')}",
-        f"- **Total sessões:** {_n(total, '—')}",
+        f"- **WORKING:** {m['n_working']}",
+        f"- **Ruins / atenção:** {m['n_ruins']}",
+        f"- **Total sessões:** {m['n_total_w']}",
+        f"- **% OK:** {pct}%",
         "",
     ]
-    ruin_list = list(waha.get("ruins") or [])[:20]
+    by_st = waha_por_status(waha)
+    if by_st:
+        linhas += ["### Distribuição dos ruins", ""]
+        for st, n in by_st:
+            linhas.append(f"- `{st}`: {n}")
+        linhas.append("")
+    ruin_list = list(waha.get("ruins") or [])[:18]
     if ruin_list:
-        linhas.append("### Sessões fora de WORKING")
+        linhas.append(f"### Sessões fora de WORKING (amostra {len(ruin_list)})")
         linhas.append("")
         for s in ruin_list:
             if isinstance(s, dict):
-                linhas.append(f"- {s.get('name') or s.get('nome')} → **{s.get('status')}**")
+                linhas.append(
+                    f"- **{s.get('name') or s.get('nome')}** · status `{s.get('status')}`"
+                )
             else:
                 linhas.append(f"- {s}")
-    if waha.get("atualizado_em") or waha.get("origem"):
-        linhas.append("")
-        linhas.append(
-            f"_WAHA origem: {waha.get('origem') or 'coleta'} · "
-            f"atualizado {waha.get('atualizado_em') or '—'}_"
-        )
 
-    # —— Chatwoot ——
-    linhas += ["", "---", "", "## 5. Chatwoot / silêncio da IA", ""]
-    ct = cw.get("totais") if isinstance(cw.get("totais"), dict) else {}
-    elegiveis = list(cw.get("leads_elegiveis_reprocessamento") or cw.get("elegiveis") or [])
-    pausados = list(cw.get("leads_pausados_ignorados") or cw.get("pausados") or [])
-    n_el = int(ct.get("elegiveis") if ct.get("elegiveis") is not None else len(elegiveis))
-    n_pau = int(
-        ct.get("pausados_com_silencio")
-        if ct.get("pausados_com_silencio") is not None
-        else len(pausados)
-    )
+    # —— Chatwoot (SÓ HOJE) ——
+    linhas += ["", "---", "", "## 5. Chatwoot — reprocessamento do dia", ""]
+    limiar = _n(cw.get("silencio_minutos"), 5)
+    if cw.get("aviso_dia"):
+        linhas.append(f"- **Aviso:** {cw.get('aviso_dia')}")
     linhas += [
-        f"- **Elegíveis a reprocessar:** {n_el}",
-        f"- **Pausados (não reprocessar):** {n_pau}",
-        f"- Conversas analisadas: {_n(cw.get('conversas_analisadas'), '—')}",
-        f"- Silêncio ≥ {_n(cw.get('silencio_minutos'), 5)} min · só hoje: {_n(cw.get('somente_hoje'), True)}",
-        "",
-        "### Lista elegíveis (top)",
+        f"- **Elegíveis HOJE:** {m['n_el']}",
+        f"- **Reprocessados HOJE (enviados):** {m.get('n_repro_dia', 0)}",
+        f"- Pausados / handoff (não reprocessar): {m['n_pau']}",
+        f"- Critério: incoming de **hoje** (America/Sao_Paulo) · s/ resposta ≥ {limiar} min · "
+        f"sem pausa/skip/handoff",
         "",
     ]
-    if elegiveis:
-        for x in elegiveis[:15]:
+
+    linhas += ["### Contas com elegíveis hoje", ""]
+    crows = [r for r in contas_cw_rows(cw, so_com_sinal=True) if r[1] != "0"]
+    if crows:
+        linhas += ["| Conta | Elegíveis hoje |", "| --- | ---: |"]
+        for r in crows[:12]:
+            linhas.append(f"| {r[0]} | {r[1]} |")
+    else:
+        linhas.append("- Nenhuma conta com elegível hoje.")
+
+    linhas += ["", "### Leads elegíveis hoje", ""]
+    if m["elegiveis"]:
+        linhas += [
+            "| Lead | Conta | Id conversa | S/ resposta | Incoming |",
+            "| --- | --- | --- | ---: | --- |",
+        ]
+        for x in m["elegiveis"][:20]:
             if not isinstance(x, dict):
                 continue
             nome = x.get("nome") or x.get("telefone") or "(sem nome)"
             cli = x.get("cliente") or x.get("account_nome") or "—"
             mins = x.get("minutos_sem_resposta")
-            link = x.get("link") or ""
-            linhas.append(
-                f"- **{nome}** · {cli} · conv {x.get('conversation_id')} · "
-                f"{mins} min"
-                + (f" · [abrir]({link})" if link else "")
-            )
+            cid = x.get("conversation_id")
+            when = str(x.get("ultimo_incoming_em") or "")[:19]
+            linhas.append(f"| {nome} | {cli} | `{cid}` | {mins} min | {when} |")
     else:
-        linhas.append("- Nenhum elegível no snapshot/cache do dash.")
+        linhas.append("- Nenhum elegível **hoje** (leads de dias anteriores são ignorados).")
 
-    linhas += ["", "### Reprocessamento automático", ""]
+    linhas += ["", "### Lote de reprocessamento (hoje)", ""]
     linhas.append(
-        f"- Detecção: ativa · envio auto: "
+        f"- Envio automático: "
         f"{'ligado' if repro.get('automatico_habilitado') else 'desligado'}"
     )
     linhas.append(
-        f"- Elegíveis detectados: {_n(repro.get('elegiveis_detectados'), n_el)} · "
-        f"status lote: {_n(repro.get('status'), '—')} · "
-        f"enviados: {_n(repro.get('enviados'), 0)}"
+        f"- Elegíveis detectados hoje: **{m['n_el']}** · "
+        f"enviados hoje: **{m.get('n_repro_dia', 0)}** · "
+        f"status: {_n(repro.get('status'), '—')}"
     )
     if repro.get("nota"):
         linhas.append(f"- Nota: {repro.get('nota')}")
-    if cw.get("atualizado_em") or cw.get("origem"):
-        linhas.append("")
-        linhas.append(
-            f"_Chatwoot origem: {cw.get('origem') or 'coleta'} · "
-            f"atualizado {cw.get('atualizado_em') or '—'}_"
-        )
+
 
     # —— Ações ——
-    linhas += ["", "---", "", "## 6. Ações recomendadas", ""]
-    acoes: list[str] = []
-    if int(tot.get("atrasadas") or 0) > 0:
-        acoes.append(f"- **P0** — Triar as {tot.get('atrasadas')} tarefas da coluna Atrasado.")
-    if int(tot.get("vencimento_hoje") or 0) > 0:
-        acoes.append(f"- **P0** — Resolver {tot.get('vencimento_hoje')} item(ns) com vencimento hoje.")
-    if n_el > 0:
-        acoes.append(f"- **P0** — Revisar {n_el} lead(s) Chatwoot elegíveis a reprocessar.")
-    if int(ruins or 0) > 0:
-        acoes.append(f"- **P1** — Recuperar sessões WAHA ruins ({ruins}); WORKING={working}.")
-    if alertas_hub:
-        acoes.append("- **P1** — Conferir alertas do Hub listados acima.")
-    if not acoes:
-        acoes.append("- Sem P0 automático no snapshot.")
-    linhas.extend(acoes)
+    linhas += ["", "---", "", "## 6. Plano de ação consolidado", ""]
+    linhas.append(
+        "_Prioridades derivadas do cruzamento Gestão + Hub + WAHA + Chatwoot._"
+    )
+    linhas.append("")
+    for text, _tone in acoes_consolidadas(m):
+        linhas.append(f"- {text}")
 
     # —— Fontes ——
-    linhas += ["", "---", "", "## 7. Fontes", ""]
+    linhas += ["", "---", "", "## 7. Fontes e frescor", ""]
     for nome, info in fontes.items():
         if isinstance(info, dict):
             linhas.append(f"- {nome}: **{info.get('status')}**")
         else:
             linhas.append(f"- {nome}: {info}")
+    for nome, bloco in (("Hub", painel), ("WAHA", waha), ("Chatwoot", cw)):
+        if isinstance(bloco, dict) and (bloco.get("atualizado_em") or bloco.get("origem")):
+            linhas.append(
+                f"- {nome} atualizado: {bloco.get('atualizado_em') or '—'} · "
+                f"origem {bloco.get('origem') or 'coleta'}"
+            )
 
     linhas += [
         "",
         "---",
         "",
-        "_Relatório montado a partir do snapshot (mesma base do dash). Números não são inventados pelo LLM._",
+        "_Relatório consolidado a partir do snapshot (mesma base do dash). Números não são inventados pelo LLM._",
         "",
     ]
     return "\n".join(str(x) for x in linhas)

@@ -64,6 +64,33 @@ def _titulo(t: dict[str, Any]) -> str:
     return str(t.get("titulo") or t.get("title") or t.get("nome") or t.get("tarefa") or "?")
 
 
+def _motivo_atraso(t: dict[str, Any]) -> str:
+    """Campo obrigatório de motivo (em breve na Gestão). Aceita aliases atuais."""
+    for key in (
+        "motivoAtraso",
+        "motivo_atraso",
+        "porqueAtraso",
+        "porque_atraso",
+        "justificativaAtraso",
+        "justificativa_atraso",
+        "motivo",
+        "porque",
+        "observacaoAtraso",
+        "observacao_atraso",
+    ):
+        val = t.get(key)
+        if val is None or val == "":
+            continue
+        if isinstance(val, dict):
+            txt = val.get("texto") or val.get("nome") or val.get("titulo") or ""
+            if str(txt).strip():
+                return str(txt).strip()
+        else:
+            if str(val).strip():
+                return str(val).strip()
+    return ""
+
+
 def _resumo_tarefa(t: dict[str, Any]) -> dict[str, Any]:
     return {
         "titulo": _titulo(t),
@@ -74,6 +101,7 @@ def _resumo_tarefa(t: dict[str, Any]) -> dict[str, Any]:
         "coluna_rotulo": coluna_rotulo(t),
         "diasAtraso": t.get("diasAtraso") or t.get("dias_atraso") or 0,
         "resumoStatus": t.get("resumoStatus") or t.get("resumo_status") or "",
+        "motivo": _motivo_atraso(t),
         "prazo": t.get("prazo") or t.get("dataPrazo") or t.get("due_date") or "",
     }
 
@@ -263,6 +291,13 @@ def _amostra_planejamento(plan: Any, limite: int = 8) -> list[str]:
     return titulos
 
 
+def _sanear_chatwoot_no_snapshot(dados: dict[str, Any]) -> dict[str, Any]:
+    """Garante elegíveis só do dia corrente — cache antigo não entra no relatório."""
+    from app.services.report_content import sanear_chatwoot_somente_hoje
+
+    return sanear_chatwoot_somente_hoje(dados)
+
+
 def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
     """Monta o snapshot consolidado a partir das coletas brutas."""
     gestao = coletas.get("gestao")
@@ -274,8 +309,8 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
         "gerado_em": datetime.now(timezone.utc).isoformat(),
         "escopo": (
             "Relatório consolidado do ecossistema Infinity: "
-            "Gestão (tarefas/atrasos/dev), Hub de Status (serviços/clientes), "
-            "WAHA (sessões WhatsApp), Chatwoot (silêncio IA / reprocess)."
+            "Gestão (tarefas/atrasos), Hub de Status (serviços/clientes), "
+            "WAHA (sessões WhatsApp), Chatwoot (s/ resposta IA / reprocess)."
         ),
         "fontes": {
             "gestao": {"status": gestao["status"] if gestao else "ausente", "fonte": gestao["fonte"] if gestao else None},
@@ -337,28 +372,44 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
                         alertas_hub.append(a.get("texto") or a.get("log") or str(a))
                     else:
                         alertas_hub.append(str(a))
+            # Sessões WAHA reais vêm do collector WAHA — ignora alerta Hub desatualizado.
+            waha_vivo = bool(
+                waha
+                and waha.get("status") == "ok"
+                and isinstance(waha.get("dados"), dict)
+                and (waha["dados"].get("totais") or {})
+            )
             for a in alertas_hub[:8]:
-                snapshot["alertas"].append(f"Hub: {a}")
+                texto = str(a)
+                t = texto.lower()
+                if waha_vivo and "waha" in t and any(
+                    k in t for k in ("não configur", "nao configur", "indispon", "pendente")
+                ):
+                    continue
+                snapshot["alertas"].append(f"Hub: {texto}")
 
     if chatwoot:
-        snapshot["chatwoot"] = chatwoot["dados"]
+        dados_cw = chatwoot["dados"] if isinstance(chatwoot.get("dados"), dict) else {}
+        if chatwoot["status"] == "ok" and dados_cw:
+            dados_cw = _sanear_chatwoot_no_snapshot(dados_cw)
+        snapshot["chatwoot"] = dados_cw if chatwoot["status"] == "ok" else chatwoot["dados"]
         if chatwoot["status"] == "stub":
             snapshot["alertas"].append("Chatwoot/IAs ainda não integrado (stub).")
         elif chatwoot["status"] == "erro":
             snapshot["alertas"].append(f"Chatwoot com erro: {chatwoot['dados'].get('erro')}")
         elif chatwoot["status"] == "ok":
-            totais = (chatwoot["dados"] or {}).get("totais") or {}
+            totais = (snapshot["chatwoot"] or {}).get("totais") or {}
             n_el = int(totais.get("elegiveis") or 0)
             n_pau = int(totais.get("pausados_com_silencio") or 0)
             n_contas = int(totais.get("contas") or 0)
             if n_el > 0:
                 prefix = f"{n_contas} conta(s) cliente — " if n_contas else ""
                 snapshot["alertas"].append(
-                    f"{prefix}{n_el} lead(s) sem resposta da IA (>threshold) elegíveis a reprocessar."
+                    f"{prefix}{n_el} lead(s) s/ resposta da IA HOJE (elegíveis a reprocessar)."
                 )
             if n_pau > 0:
                 snapshot["alertas"].append(
-                    f"{n_pau} lead(s) em silêncio mas com etiqueta de pausa — não reprocessar."
+                    f"{n_pau} lead(s) s/ resposta com etiqueta de pausa — não reprocessar."
                 )
 
     if waha:
@@ -378,4 +429,7 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
             if n_ruim > 0:
                 snapshot["alertas"].append(f"{n_ruim} sessão(ões) WAHA fora de WORKING.")
 
+    from app.services.report_md import ordenar_alertas_por_criticidade
+
+    snapshot["alertas"] = ordenar_alertas_por_criticidade(snapshot["alertas"])
     return snapshot

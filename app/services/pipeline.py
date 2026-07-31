@@ -8,6 +8,7 @@ from typing import Any
 
 from app.collectors import chatwoot_health, gestao, painel, waha_health
 from app.collectors.base import resultado_erro, resultado_ok
+from app.collectors.chatwoot_health import filtrar_leads_somente_hoje, snapshot_eh_de_hoje
 from app.config import get_settings
 from app.services import ops_cache, store
 from app.services.aggregator import agregar
@@ -18,6 +19,7 @@ logger = logging.getLogger("monitor.pipeline")
 
 # Relatório NÃO deve re-varrer Chatwoot inteiro (pode levar >10–20 min).
 # Usa cache dos pollers 24h; Gestão continua fresca (é o núcleo do relatório).
+# Cache Chatwoot só vale se for do dia corrente (America/Sao_Paulo).
 _GESTAO_TIMEOUT = 180.0
 _PAINEL_TIMEOUT = 60.0
 _WAHA_TIMEOUT = 60.0
@@ -25,12 +27,27 @@ _LAB_FALLBACK_TIMEOUT = 200.0
 
 
 def _chatwoot_from_cache(cached: dict[str, Any]) -> dict[str, Any]:
+    s = get_settings()
+    tz = s.report_timezone
+    only_today = bool(cached.get("somente_hoje", True))
     elegiveis = list(cached.get("elegiveis") or [])
     pausados = list(cached.get("pausados") or [])
+    if only_today:
+        antes = len(elegiveis)
+        elegiveis = filtrar_leads_somente_hoje(elegiveis, tz_name=tz)
+        if antes and len(elegiveis) < antes:
+            logger.info(
+                "chatwoot cache: filtrou elegíveis fora de hoje (%s → %s)",
+                antes,
+                len(elegiveis),
+            )
+    totais = dict(cached.get("totais") or {})
+    totais["elegiveis"] = len(elegiveis)
+    totais["pausados_com_silencio"] = len(pausados)
     return {
         "silencio_minutos": cached.get("silencio_minutos"),
         "somente_hoje": cached.get("somente_hoje"),
-        "totais": cached.get("totais") or {},
+        "totais": totais,
         "conversas_analisadas": cached.get("conversas_analisadas"),
         "contas": cached.get("por_conta") or [],
         "leads_elegiveis_reprocessamento": elegiveis,
@@ -108,14 +125,26 @@ async def coletar_tudo(*, forcar_fresco: bool = False) -> dict[str, Any]:
         return resultado_erro("painel-infinity", f"timeout/indisponível após {_PAINEL_TIMEOUT:.0f}s")
 
     async def _chatwoot():
+        s = get_settings()
         cached = live.get("chatwoot")
-        if not forcar_fresco and cached and cached.get("status") == "ok":
+        cache_ok = (
+            not forcar_fresco
+            and cached
+            and cached.get("status") == "ok"
+            and snapshot_eh_de_hoje(cached.get("atualizado_em"), tz_name=s.report_timezone)
+        )
+        if cache_ok:
             logger.info("chatwoot via ops_cache (%s)", cached.get("atualizado_em"))
             return resultado_ok("chatwoot-ias", _chatwoot_from_cache(cached))
+        if cached and cached.get("status") == "ok" and not forcar_fresco:
+            logger.warning(
+                "chatwoot cache fora do dia corrente (%s) — ignorando (só dados de hoje)",
+                cached.get("atualizado_em"),
+            )
         if not forcar_fresco and cached and cached.get("status") == "erro":
             return resultado_erro("chatwoot-ias", "cache com erro")
-        # Sem cache: varredura completa é cara — limita com aviso.
-        logger.warning("chatwoot sem cache útil — varredura completa (pode demorar)")
+        # Sem cache do dia: varredura completa é cara — limita com aviso.
+        logger.warning("chatwoot sem cache útil de hoje — varredura completa (pode demorar)")
         try:
             return await asyncio.wait_for(chatwoot_health.coletar(), timeout=300.0)
         except asyncio.TimeoutError:
@@ -228,6 +257,7 @@ async def gerar_relatorio_diario(
         from app.services.report_pdf import snapshot_para_pdf
 
         pdf_destino = Path(paths["markdown"]).with_suffix(".pdf")
+        # PDF usa layout determinístico (tabelas estáveis). O MD da IA fica no .md / WhatsApp.
         pdf_path = snapshot_para_pdf(snapshot, pdf_destino)
         if pdf_path:
             paths["pdf"] = str(pdf_path)

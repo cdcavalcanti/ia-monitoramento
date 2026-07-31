@@ -75,19 +75,20 @@ Use os alertas e totais do snapshot — não invente uptime.
 
 Também traz bloco `numeros` (sessões WAHA do hub). Se pendente, diga o motivo.
 
-## O que o relatório precisa cobrir (Gestão — fase 1)
-1. Visão executiva: quantos atrasos, vencendo hoje, clientes em risco.
-2. Por cliente/projeto: status geral, o que está em desenvolvimento, o que
-   está atrasado (prazo vs. agora).
-3. Semana: o que está no planejamento do time.
-4. Eficiência do time (números da API, sem inventar tendência temporal se
-   não houver série).
-5. Usar resumoStatus quando existir para narrar entregas recentes.
-6. Alertas claros e priorizados (o que exige ação hoje).
+## O que o relatório precisa cobrir
+1. Panorama consolidado com leitura cruzada (não um resumo raso de alertas).
+2. Gestão: atrasos com cliente, projeto, responsável, dias e motivo (sem planejamento da semana).
+3. Hub: saúde, serviços, clientes partial/offline (nunca repetir alerta WAHA "não configurada").
+4. WAHA: WORKING vs ruins (por status), % OK — fonte = API WAHA do monitor.
+5. Chatwoot: elegíveis e reprocessados **somente do dia** (America/Sao_Paulo).
+6. Plano de ação P0/P1/P2 concreto.
+7. Usar resumoStatus quando existir para narrar entregas recentes.
 
 ## O que NÃO fazer
 - Não inventar dados de fontes stub/erro.
 - Não culpar pessoa sem base nos números (atraso ≠ preguiça).
 - Não prometer que Painel/Chatwoot estão ok se estão stub.
-- Não transformar o relatório em romance — bullets e seções objetivas.
+- Não entregar só um "resumo executivo" de 5 bullets — o produto é consolidado.
+- Não inventar causa de falha de IA sem evidência (label/nota/atributo).
 """.strip()
+
