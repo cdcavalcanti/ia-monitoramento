@@ -20,5 +20,27 @@ services:
       retries: 3
       start_period: 20s
 
+  # Exposição via Cloudflare Tunnel (padrão da casa). Só sobe com
+  # `--profile tunnel` e TUNNEL_TOKEN no .env — sem token, o serviço
+  # fica acessível apenas em 127.0.0.1:${APP_HOST_PORT} na VPS.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ia-monitoramento-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    profiles: ["tunnel"]
+    depends_on:
+      - app
+
 volumes:
   monitoramento_data:
+
+# Subnet declarada: os address pools do dockerd na VPS co-tenant estão
+# esgotados — sem isso o `docker compose up` falha ao criar a rede.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.16.48.0/24
