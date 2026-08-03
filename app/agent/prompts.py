@@ -32,9 +32,10 @@ Use exatamente estas seções (Markdown):
 - Depois, sinais por criticidade (bullets curtos).
 
 ## 2. Gestão por cliente
-- Para CADA cliente com fila ativa: nome, projetos, métricas (atrasadas / hoje / amanhã / semana).
-- Destaque ATRASADAS para resolver (tabela: Projeto | Responsável | Dias | Tarefa).
-- Planejamento da semana do cliente (hoje + amanhã + semana).
+- Para CADA cliente com fila ativa: setores (se houver), projetos, métricas.
+- Hierarquia obrigatória nas tabelas: **Cliente → Setor (se tiver) → Projeto → Tarefa**.
+- Destaque ATRASADAS para resolver (tabela: Setor | Projeto | Responsável | Dias | Tarefa).
+- Planejamento da semana do cliente (hoje + amanhã + semana) com a mesma hierarquia.
 - NÃO faça um único bloco genérico de atrasos misturando todos os clientes.
 
 ## 3. Hub de Status

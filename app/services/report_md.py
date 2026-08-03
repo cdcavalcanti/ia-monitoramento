@@ -154,9 +154,12 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
             met = bloco.get("metricas") or {}
             nome = bloco.get("cliente") or "?"
             projetos = list(bloco.get("projetos") or [])
+            setores = list(bloco.get("setores") or [])
             linhas += [
                 f"### {nome}",
                 "",
+                f"- **Hierarquia:** Cliente → Setor (se houver) → Projeto → Tarefa",
+                f"- **Setores:** {', '.join(setores) if setores else '—'}",
                 f"- **Projetos:** {', '.join(projetos) if projetos else '—'}",
                 f"- **Filas:** {met.get('atrasadas', 0)} atrasada(s) · "
                 f"{met.get('hoje', 0)} hoje · {met.get('amanha', 0)} amanhã · "
@@ -169,11 +172,11 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
                 linhas += [
                     "#### Atrasadas — resolver",
                     "",
-                    "| Projeto | Responsável | Dias | Tarefa |",
-                    "| --- | --- | ---: | --- |",
+                    "| Setor | Projeto | Responsável | Dias | Tarefa |",
+                    "| --- | --- | --- | ---: | --- |",
                 ]
                 for r in tarefas_rows(atr, com_dias=True, limite=15):
-                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |")
+                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} |")
                 linhas.append("")
 
             plan = list(bloco.get("planejamento_semana") or [])
@@ -181,13 +184,13 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
                 linhas += [
                     "#### Planejamento da semana (hoje · amanhã · semana)",
                     "",
-                    "| Projeto | Responsável | Tarefa |",
-                    "| --- | --- | --- |",
+                    "| Setor | Projeto | Responsável | Tarefa |",
+                    "| --- | --- | --- | --- |",
                 ]
                 for r in tarefas_rows(plan, com_dias=False, limite=12):
-                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} |")
+                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |")
                 if len(plan) > 12:
-                    linhas.append(f"| … | … | +{len(plan) - 12} no kanban |")
+                    linhas.append(f"| … | … | … | +{len(plan) - 12} no kanban |")
                 linhas.append("")
     elif gestao.get("erro"):
         linhas.append(f"- Erro Gestão: {gestao.get('erro')}")

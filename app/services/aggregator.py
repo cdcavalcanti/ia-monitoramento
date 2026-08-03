@@ -52,6 +52,16 @@ def _nome_projeto(t: dict[str, Any]) -> str:
     return "?"
 
 
+def _nome_setor(t: dict[str, Any]) -> str:
+    """Setor do Growth Tree (pode vir vazio/null)."""
+    for key in ("setor", "setorNome", "nomeSetor", "setor_nome"):
+        if t.get(key) is not None:
+            nome = _nome_de_campo(t.get(key), "nome", "name", "titulo", "rotulo", "id")
+            if nome and nome not in ("?", "None", "null"):
+                return nome
+    return ""
+
+
 def _responsavel(t: dict[str, Any]) -> str:
     for key in ("responsavel", "responsavelNome", "assignee"):
         if t.get(key) is not None:
@@ -94,6 +104,7 @@ def _resumo_tarefa(t: dict[str, Any]) -> dict[str, Any]:
     return {
         "titulo": _titulo(t),
         "cliente": _nome_cliente(t),
+        "setor": _nome_setor(t),
         "projeto": _nome_projeto(t),
         "responsavel": _responsavel(t),
         "coluna": coluna_tarefa(t),
@@ -138,6 +149,7 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
                 "entrada": [],
                 "acompanhamento": [],
                 "projetos": set(),
+                "setores": set(),
             }
         return por_cliente[nome]
 
@@ -152,6 +164,9 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
         proj = str(item.get("projeto") or "").strip()
         if proj:
             bloco["projetos"].add(proj)
+        setor = str(item.get("setor") or "").strip()
+        if setor:
+            bloco["setores"].add(setor)
 
         if tarefa_atrasada(t) or col_id in COLUNA_ATRASADO:
             atrasadas.append(item)
@@ -218,6 +233,7 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
         gestao_por_cliente.append(
             {
                 "cliente": nome,
+                "setores": sorted(bloco["setores"]),
                 "projetos": sorted(bloco["projetos"]),
                 "atrasadas": bloco["atrasadas"][:25],
                 "vencimento_hoje": bloco["vencimento_hoje"][:20],
@@ -234,6 +250,7 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
                     "semana": n_semana,
                     "aguardando": n_aguard,
                     "projetos": len(bloco["projetos"]),
+                    "setores": len(bloco["setores"]),
                 },
             }
         )

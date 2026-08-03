@@ -26,7 +26,7 @@ direto, acionável. Não é texto de marketing nem mensagem para o cliente final
 ### [FASE 1] Gestão Infinity (gestao-infinity.ai-infinity.io)
 API read-only com header X-Relatorio-Token.
 Endpoints usados:
-- GET /api/tarefas — kanban (coluna, diasAtraso, resumoStatus, cliente, projeto, responsável)
+- GET /api/tarefas — kanban (coluna, diasAtraso, resumoStatus, cliente, setor, projeto, responsável)
 - GET /api/clientes e /api/clientes/:id — Growth Tree, carteira, % no prazo, risco
 - GET /api/eficiencia — carga e taxa de entrega do time (total corrente, sem filtro de período)
 - GET /api/pessoas/:id/planejamento?semana_inicio=&semana_fim= — plano da semana
@@ -77,7 +77,7 @@ Também pode trazer bloco `numeros` no Hub — ignore ruído de WAHA (fora do es
 
 ## O que o relatório precisa cobrir
 1. Panorama consolidado com leitura cruzada (não um resumo raso de alertas).
-2. Gestão **por cliente**: projetos, atrasadas (destaque), planejamento da semana (hoje/amanhã/semana).
+2. Gestão **por cliente**: hierarquia Cliente → Setor (se houver) → Projeto → Tarefa; atrasadas em destaque; planejamento da semana.
 3. Hub: saúde, serviços, clientes partial/offline (sem alertas WAHA).
 4. Chatwoot: elegíveis e reprocessados **somente do dia** (America/Sao_Paulo).
 5. Plano de ação P0/P1/P2 concreto.

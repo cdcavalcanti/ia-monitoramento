@@ -534,11 +534,21 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
             met = bloco.get("metricas") or {}
             nome = str(bloco.get("cliente") or "?")
             projetos = list(bloco.get("projetos") or [])
+            setores = list(bloco.get("setores") or [])
             n_atr_c = int(met.get("atrasadas") or 0)
             doc.subsection(
                 f"{nome}  |  {n_atr_c} atrasada(s) · {met.get('hoje', 0)} hoje · "
                 f"{met.get('semana', 0)} semana",
                 keep_with_mm=36,
+            )
+            doc.para(
+                "Hierarquia: Cliente > Setor (se houver) > Projeto > Tarefa",
+                size=7.5,
+            )
+            doc.para(
+                f"Setores: {', '.join(setores[:8]) if setores else '—'}"
+                + (f" (+{len(setores) - 8})" if len(setores) > 8 else ""),
+                size=8,
             )
             doc.para(
                 f"Projetos: {', '.join(projetos[:8]) if projetos else '—'}"
@@ -559,18 +569,18 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
             if atr:
                 doc.para("ATRASADAS — resolver", size=8.5, bold=True)
                 doc.table(
-                    ["Projeto", "Responsavel", "Dias", "Tarefa"],
+                    ["Setor", "Projeto", "Responsavel", "Dias", "Tarefa"],
                     tarefas_rows(atr, com_dias=True, limite=12),
-                    col_weights=[1.4, 1.2, 0.55, 2.2],
+                    col_weights=[1.0, 1.3, 1.1, 0.5, 2.0],
                 )
 
             plan = list(bloco.get("planejamento_semana") or [])
             if plan:
                 doc.para("Planejamento da semana (hoje · amanha · semana)", size=8.5, bold=True)
                 doc.table(
-                    ["Projeto", "Responsavel", "Tarefa"],
+                    ["Setor", "Projeto", "Responsavel", "Tarefa"],
                     tarefas_rows(plan, com_dias=False, limite=10),
-                    col_weights=[1.5, 1.3, 2.5],
+                    col_weights=[1.0, 1.3, 1.1, 2.2],
                 )
                 if len(plan) > 10:
                     doc.para(f"+{len(plan) - 10} no kanban deste cliente.", size=7.5)

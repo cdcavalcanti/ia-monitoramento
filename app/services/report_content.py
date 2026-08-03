@@ -167,16 +167,18 @@ def metricas_base(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def tabela_atrasos_detalhe(gestao: dict[str, Any], *, limite: int = 40) -> list[list[str]]:
-    """Linhas: Cliente | Projeto | Responsável | Dias | Motivo | Tarefa."""
+    """Linhas: Cliente | Setor | Projeto | Responsável | Dias | Motivo | Tarefa."""
     tops = list(gestao.get("atrasadas_top") or [])[:limite]
     rows: list[list[str]] = []
     for t in tops:
         if not isinstance(t, dict):
             continue
         motivo = str(t.get("motivo") or "").strip() or "—"
+        setor = str(t.get("setor") or "").strip() or "—"
         rows.append(
             [
                 str(t.get("cliente") or "?")[:22],
+                setor[:18],
                 str(t.get("projeto") or "?")[:22],
                 str(t.get("responsavel") or "?")[:20],
                 f"{t.get('diasAtraso') or 0}d",
@@ -213,6 +215,7 @@ def _gestao_por_cliente_fallback(gestao: dict[str, Any], *, limite: int = 30) ->
             "vencimento_semana": [],
             "aguardando": [],
             "projetos": set(),
+            "setores": set(),
         }
     )
 
@@ -225,6 +228,9 @@ def _gestao_por_cliente_fallback(gestao: dict[str, Any], *, limite: int = 30) ->
             proj = str(t.get("projeto") or "").strip()
             if proj:
                 bags[nome]["projetos"].add(proj)
+            setor = str(t.get("setor") or "").strip()
+            if setor:
+                bags[nome].setdefault("setores", set()).add(setor)
 
     _push("atrasadas", list(gestao.get("atrasadas_top") or []))
     _push("vencimento_hoje", list(gestao.get("vencimento_hoje") or []))
@@ -263,6 +269,7 @@ def _gestao_por_cliente_fallback(gestao: dict[str, Any], *, limite: int = 30) ->
         result.append(
             {
                 "cliente": nome,
+                "setores": sorted(bloco.get("setores") or []),
                 "projetos": sorted(bloco["projetos"]),
                 "atrasadas": bloco["atrasadas"][:25],
                 "vencimento_hoje": bloco["vencimento_hoje"][:20],
@@ -277,6 +284,7 @@ def _gestao_por_cliente_fallback(gestao: dict[str, Any], *, limite: int = 30) ->
                     "semana": n_semana,
                     "aguardando": n_aguard,
                     "projetos": len(bloco["projetos"]),
+                    "setores": len(bloco.get("setores") or []),
                 },
             }
         )
@@ -291,12 +299,14 @@ def _gestao_por_cliente_fallback(gestao: dict[str, Any], *, limite: int = 30) ->
 
 
 def _tarefa_row_curta(t: dict[str, Any], *, com_dias: bool = False) -> list[str]:
-    proj = str(t.get("projeto") or "?")[:28]
-    resp = str(t.get("responsavel") or "?")[:20]
-    titulo = str(t.get("titulo") or "?")[:48]
+    """Hierarquia: Setor | Projeto | Responsável | [Dias] | Tarefa (cliente já é seção)."""
+    setor = str(t.get("setor") or "").strip() or "—"
+    proj = str(t.get("projeto") or "?")[:26]
+    resp = str(t.get("responsavel") or "?")[:18]
+    titulo = str(t.get("titulo") or "?")[:44]
     if com_dias:
-        return [proj, resp, f"{t.get('diasAtraso') or 0}d", titulo]
-    return [proj, resp, titulo]
+        return [setor[:16], proj, resp, f"{t.get('diasAtraso') or 0}d", titulo]
+    return [setor[:16], proj, resp, titulo]
 
 
 def tarefas_rows(itens: list[Any], *, com_dias: bool = False, limite: int = 15) -> list[list[str]]:
@@ -305,6 +315,17 @@ def tarefas_rows(itens: list[Any], *, com_dias: bool = False, limite: int = 15) 
         if isinstance(t, dict):
             rows.append(_tarefa_row_curta(t, com_dias=com_dias))
     return rows
+
+
+def caminho_hierarquia(t: dict[str, Any]) -> str:
+    """Cliente > Setor > Projeto > Tarefa (omite setor vazio)."""
+    partes = [
+        str(t.get("cliente") or "").strip(),
+        str(t.get("setor") or "").strip(),
+        str(t.get("projeto") or "").strip(),
+        str(t.get("titulo") or "").strip(),
+    ]
+    return " > ".join(p for p in partes if p)
 
 
 
