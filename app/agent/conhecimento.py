@@ -73,16 +73,15 @@ Enums: health do cliente operational|partial|offline;
 status de serviço online|offline|degraded; saudeGeral ok|atencao|critico.
 Use os alertas e totais do snapshot — não invente uptime.
 
-Também traz bloco `numeros` (sessões WAHA do hub). Se pendente, diga o motivo.
+Também pode trazer bloco `numeros` no Hub — ignore ruído de WAHA (fora do escopo do monitor).
 
 ## O que o relatório precisa cobrir
 1. Panorama consolidado com leitura cruzada (não um resumo raso de alertas).
-2. Gestão: atrasos com cliente, projeto, responsável, dias e motivo (sem planejamento da semana).
-3. Hub: saúde, serviços, clientes partial/offline (nunca repetir alerta WAHA "não configurada").
-4. WAHA: WORKING vs ruins (por status), % OK — fonte = API WAHA do monitor.
-5. Chatwoot: elegíveis e reprocessados **somente do dia** (America/Sao_Paulo).
-6. Plano de ação P0/P1/P2 concreto.
-7. Usar resumoStatus quando existir para narrar entregas recentes.
+2. Gestão **por cliente**: projetos, atrasadas (destaque), planejamento da semana (hoje/amanhã/semana).
+3. Hub: saúde, serviços, clientes partial/offline (sem alertas WAHA).
+4. Chatwoot: elegíveis e reprocessados **somente do dia** (America/Sao_Paulo).
+5. Plano de ação P0/P1/P2 concreto.
+6. Usar resumoStatus quando existir para narrar entregas recentes.
 
 ## O que NÃO fazer
 - Não inventar dados de fontes stub/erro.
@@ -90,5 +89,6 @@ Também traz bloco `numeros` (sessões WAHA do hub). Se pendente, diga o motivo.
 - Não prometer que Painel/Chatwoot estão ok se estão stub.
 - Não entregar só um "resumo executivo" de 5 bullets — o produto é consolidado.
 - Não inventar causa de falha de IA sem evidência (label/nota/atributo).
+- Não incluir seção WAHA (sessões WhatsApp saíram do monitor).
 """.strip()
 

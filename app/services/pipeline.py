@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Any
 
-from app.collectors import chatwoot_health, gestao, painel, waha_health
+from app.collectors import chatwoot_health, gestao, painel
 from app.collectors.base import resultado_erro, resultado_ok
 from app.collectors.chatwoot_health import filtrar_leads_somente_hoje, snapshot_eh_de_hoje
 from app.config import get_settings
@@ -22,7 +22,6 @@ logger = logging.getLogger("monitor.pipeline")
 # Cache Chatwoot só vale se for do dia corrente (America/Sao_Paulo).
 _GESTAO_TIMEOUT = 180.0
 _PAINEL_TIMEOUT = 60.0
-_WAHA_TIMEOUT = 60.0
 _LAB_FALLBACK_TIMEOUT = 200.0
 
 
@@ -78,23 +77,14 @@ def _painel_from_cache(cached: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _waha_from_cache(cached: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "totais": cached.get("totais") or {},
-        "ruins": cached.get("ruins") or [],
-        "atualizado_em": cached.get("atualizado_em"),
-        "origem": "ops_cache",
-    }
-
-
 async def coletar_tudo(*, forcar_fresco: bool = False) -> dict[str, Any]:
     """Coleta para relatório.
 
-    Preferência: cache vivo (Chatwoot/WAHA/Hub) + Gestão fresca.
+    Preferência: cache vivo (Chatwoot/Hub) + Gestão fresca.
     `forcar_fresco=True` refaz tudo (lento — evitar no scheduler).
+    WAHA removido do monitoramento (envio WhatsApp continua em delivery).
     """
     live = ops_cache.get_all()
-
     async def _gestao():
         try:
             return await asyncio.wait_for(gestao.coletar(), timeout=_GESTAO_TIMEOUT)
@@ -151,29 +141,11 @@ async def coletar_tudo(*, forcar_fresco: bool = False) -> dict[str, Any]:
             logger.error("timeout Chatwoot (300s)")
             return resultado_erro("chatwoot-ias", "timeout após 300s na varredura")
 
-    async def _waha():
-        cached = live.get("waha")
-        if not forcar_fresco and cached and cached.get("status") in ("ok", "erro"):
-            logger.info("waha via ops_cache (%s)", cached.get("atualizado_em"))
-            st = cached.get("status") or "ok"
-            dados = _waha_from_cache(cached)
-            return resultado_ok("waha-sessions", dados) if st == "ok" else resultado_erro(
-                "waha-sessions", "cache com erro"
-            )
-        try:
-            return await asyncio.wait_for(waha_health.coletar(), timeout=_WAHA_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.error("timeout WAHA (%ss)", _WAHA_TIMEOUT)
-            return resultado_erro("waha-sessions", f"timeout após {_WAHA_TIMEOUT:.0f}s")
-
-    gestao_r, painel_r, chatwoot_r, waha_r = await asyncio.gather(
-        _gestao(), _painel(), _chatwoot(), _waha()
-    )
+    gestao_r, painel_r, chatwoot_r = await asyncio.gather(_gestao(), _painel(), _chatwoot())
     return {
         "gestao": gestao_r,
         "painel": painel_r,
         "chatwoot": chatwoot_r,
-        "waha": waha_r,
     }
 
 

@@ -43,7 +43,7 @@
       <article class="kpi"><span>Capturados</span><strong id="mCap">—</strong><small>elegíveis detectados</small></article>
       <article class="kpi"><span>Reprocess</span><strong id="mSent">—</strong><small id="mSentSub">enviados / stub</small></article>
       <article class="kpi accent"><span>Fila Chatwoot</span><strong id="mCwFila">—</strong><small id="mCwSub">só hoje</small></article>
-      <article class="kpi danger"><span>WAHA ruins</span><strong id="mWahaRuin">—</strong><small id="mWahaSub">sessões</small></article>
+      <article class="kpi"><span>Hub saúde</span><strong id="mHubSaude">—</strong><small id="mHubSub">status</small></article>
     </section>
 
     <div class="fonte-strip" id="fontes"></div>
@@ -62,17 +62,6 @@
           </div>
         </header>
         <div class="card-list" id="cwList"></div>
-      </section>
-
-      <section class="board" id="panelWaha">
-        <header class="board-h">
-          <div>
-            <h2>WAHA</h2>
-            <p class="board-sub" id="wahaMeta">Sessões que precisam atenção</p>
-          </div>
-          <div class="stat-row" id="wahaStats"></div>
-        </header>
-        <div class="card-list" id="wahaList"></div>
       </section>
 
       <section class="board" id="panelHub">
@@ -95,7 +84,7 @@
         </header>
         <div class="chat-log" id="chatLog" role="log" aria-live="polite"></div>
         <form class="chat-form" id="chatForm">
-          <textarea id="chatInput" rows="2" placeholder="Pergunte sobre silêncios, WAHA, Hub…" required></textarea>
+          <textarea id="chatInput" rows="2" placeholder="Pergunte sobre silêncios, Hub, Gestão…" required></textarea>
           <button type="submit" class="btn primary" id="chatSend">Enviar</button>
         </form>
         <pre class="log" id="actionLog" hidden></pre>

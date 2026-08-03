@@ -157,7 +157,6 @@ function renderFontes(fontes) {
     ["gestao", "Gestão"],
     ["painel", "Hub"],
     ["chatwoot", "Chatwoot"],
-    ["waha", "WAHA"],
     ["lab", "Lab"],
     ["whatsapp", "WhatsApp"],
     ["reprocess_auto", "Reprocess"],
@@ -295,50 +294,7 @@ function renderChatwoot() {
 }
 
 function renderWaha() {
-  const w = liveCache.waha;
-  if (!w) {
-    $("wahaMeta").textContent = "Aguardando coleta…";
-    $("wahaStats").innerHTML = "";
-    $("wahaList").innerHTML = `<div class="empty">Sem dados WAHA.</div>`;
-    $("mWahaRuin").textContent = "—";
-    return;
-  }
-  const tot = w.totais || {};
-  $("mWahaRuin").textContent = fmtNum(tot.ruins);
-  $("mWahaSub").textContent = `${fmtNum(tot.working)} WORKING / ${fmtNum(tot.total)}`;
-  $("wahaMeta").textContent = `Atualizado ${ago(w.atualizado_em)}`;
-  $("wahaStats").innerHTML = `
-    <span class="pill ok">WORKING ${fmtNum(tot.working)}</span>
-    <span class="pill bad">ruins ${fmtNum(tot.ruins)}</span>
-    <span class="pill">total ${fmtNum(tot.total)}</span>`;
-  const ruins = w.ruins || [];
-  $("wahaList").innerHTML = ruins.length
-    ? ruins
-        .map((s) =>
-          card({
-            tone: "bad",
-            tag: "Atenção",
-            title: s.name,
-            sub: "Sessão fora de WORKING",
-            log: s.log || `Status ${s.status}`,
-            footLeft: "WAHA",
-            footRight: s.status,
-            footTone: "bad",
-            detail: {
-              source: "WAHA · sessão",
-              fields: [
-                { label: "Sessão", value: s.name },
-                { label: "Status", value: s.status },
-                { label: "Engine", value: s.engine },
-                { label: "Me", value: s.me || s.pushName },
-                { label: "Atualizado", value: s.atualizado_em || w.atualizado_em },
-              ],
-              raw: s,
-            },
-          })
-        )
-        .join("")
-    : `<div class="empty">Todas as sessões WORKING.</div>`;
+  /* WAHA removido do monitor */
 }
 
 function renderHub() {
@@ -347,10 +303,15 @@ function renderHub() {
     $("hubMeta").textContent = "Aguardando coleta…";
     $("hubStats").innerHTML = "";
     $("hubList").innerHTML = `<div class="empty">Sem dados do Hub.</div>`;
+    if ($("mHubSaude")) $("mHubSaude").textContent = "—";
     return;
   }
   const saude = h.saudeGeral || "—";
   const cls = /ok|saudavel/i.test(saude) ? "ok" : /atencao/i.test(saude) ? "warn" : "bad";
+  if ($("mHubSaude")) {
+    $("mHubSaude").textContent = saude;
+    $("mHubSub").textContent = `atualizado ${ago(h.atualizado_em)}`;
+  }
   $("hubMeta").textContent = `Atualizado ${ago(h.atualizado_em)}`;
   $("hubStats").innerHTML = `
     <span class="pill ${cls}">saúde ${esc(saude)}</span>
@@ -475,8 +436,8 @@ async function refresh({ forceLight = true } = {}) {
 
     const operando = !!status.operando;
     const cwFila = liveCache.chatwoot?.totais?.elegiveis ?? 0;
-    const ruins = liveCache.waha?.totais?.ruins ?? 0;
-    const warn = ruins > 0 || cwFila > 0;
+    const hubWarn = /atencao|crit/i.test(String(liveCache.painel?.saudeGeral || ""));
+    const warn = hubWarn || cwFila > 0;
     setLive(
       operando ? (warn ? "warn" : true) : false,
       operando ? (warn ? "Atenção" : "Operando") : "Pausado",
@@ -515,8 +476,8 @@ async function refresh({ forceLight = true } = {}) {
 function updateClockLabel() {
   const el = $("liveClockText");
   if (!el || refreshing) return;
-  const wahaAgo = liveCache.waha?.atualizado_em ? ago(liveCache.waha.atualizado_em) : "—";
-  el.textContent = `ao vivo · ${tickLeft}s · WAHA ${wahaAgo}`;
+  const hubAgo = liveCache.painel?.atualizado_em ? ago(liveCache.painel.atualizado_em) : "—";
+  el.textContent = `ao vivo · ${tickLeft}s · Hub ${hubAgo}`;
 }
 
 function showLog(text) {
@@ -533,8 +494,9 @@ $("cwTabs").addEventListener("click", (e) => {
   renderAllLive();
 });
 
-["cwList", "wahaList", "hubList"].forEach((id) => {
+["cwList", "hubList"].forEach((id) => {
   const el = $(id);
+  if (!el) return;
   el.addEventListener("click", onCardActivate);
   el.addEventListener("keydown", onCardActivate);
 });
@@ -606,7 +568,7 @@ $("chatForm").addEventListener("submit", async (e) => {
   }
 });
 
-addBubble("bot", "Monitor ao vivo: WAHA/Hub atualizam sozinhos ~15–20s. Chatwoot depende da varredura (poller ou botão).");
+addBubble("bot", "Monitor ao vivo: Hub atualiza sozinho ~15–20s. Chatwoot depende da varredura (poller ou botão).");
 refresh({ forceLight: true });
 setInterval(() => {
   tickLeft = Math.max(0, tickLeft - 1);

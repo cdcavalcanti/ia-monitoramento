@@ -60,13 +60,8 @@ async def _lifespan(app: FastAPI):
 
     async def _warm_cache() -> None:
         try:
-            from app.collectors import waha_health
             from app.collectors.painel import coletar_overview_leve
 
-            if settings.waha_health_enabled:
-                wr = await waha_health.coletar()
-                if wr["status"] == "ok":
-                    ops_cache.set_waha(wr["dados"] or {}, status="ok")
             if settings.painel_enabled:
                 pr = await coletar_overview_leve()
                 if pr["status"] == "ok":
@@ -110,7 +105,7 @@ async def health() -> dict[str, Any]:
         "chatwoot_silence_min": settings.chatwoot_silence_minutes,
         "chatwoot_only_today": settings.chatwoot_only_today,
         "chatwoot_contas": len(settings.chatwoot_account_list),
-        "waha_health": settings.waha_health_enabled,
+        "waha_health": False,
         "alert_poller": settings.alert_poller_enabled,
         "reprocess": settings.reprocess_ready,
         "scheduler": settings.scheduler_enabled,
@@ -136,7 +131,7 @@ async def ops_status() -> dict[str, Any]:
             "gestao": settings.gestao_enabled,
             "painel": settings.painel_enabled,
             "chatwoot": settings.chatwoot_health_enabled,
-            "waha": settings.waha_health_enabled,
+            "waha": False,
             "lab": settings.infinity_lab_enabled,
             "openai_fallback": bool(settings.openai_api_key),
             "whatsapp": settings.delivery_whatsapp_enabled,
@@ -197,7 +192,7 @@ def _get_light_lock() -> asyncio.Lock:
 
 @app.post("/ops/refresh-live")
 async def ops_refresh_live() -> dict[str, Any]:
-    """Atualiza WAHA + Hub agora (leve). Debounce ~15s pra não martelar APIs."""
+    """Atualiza Hub agora (leve). Debounce ~15s pra não martelar APIs."""
     import time
 
     global _last_light_refresh
@@ -207,15 +202,8 @@ async def ops_refresh_live() -> dict[str, Any]:
         if not skipped:
             _last_light_refresh = agora
             try:
-                from app.collectors import waha_health
                 from app.collectors.painel import coletar_overview_leve
 
-                if settings.waha_health_enabled:
-                    wr = await waha_health.coletar()
-                    if wr["status"] == "ok":
-                        ops_cache.set_waha(wr["dados"] or {}, status="ok")
-                    else:
-                        ops_cache.set_waha({"totais": {}, "ruins": []}, status=wr["status"])
                 if settings.painel_enabled:
                     pr = await coletar_overview_leve()
                     if pr["status"] == "ok":

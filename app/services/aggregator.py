@@ -8,7 +8,6 @@ objetivo para o relatório.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
 from typing import Any
 
 from app.collectors.base import ColetaResult
@@ -126,6 +125,21 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
 
     atrasos_por_cliente: dict[str, list[dict[str, Any]]] = defaultdict(list)
     atrasos_por_resp: Counter[str] = Counter()
+    por_cliente: dict[str, dict[str, Any]] = {}
+
+    def _bloco_cliente(nome: str) -> dict[str, Any]:
+        if nome not in por_cliente:
+            por_cliente[nome] = {
+                "atrasadas": [],
+                "vencimento_hoje": [],
+                "vencimento_amanha": [],
+                "vencimento_semana": [],
+                "aguardando": [],
+                "entrada": [],
+                "acompanhamento": [],
+                "projetos": set(),
+            }
+        return por_cliente[nome]
 
     for t in tarefas:
         col_id = coluna_tarefa(t).lower()
@@ -133,24 +147,36 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
         por_coluna[col_label] += 1
         por_coluna_id[col_id or "(sem)"] += 1
         item = _resumo_tarefa(t)
+        cli_nome = str(item.get("cliente") or "?").strip() or "?"
+        bloco = _bloco_cliente(cli_nome)
+        proj = str(item.get("projeto") or "").strip()
+        if proj:
+            bloco["projetos"].add(proj)
 
         if tarefa_atrasada(t) or col_id in COLUNA_ATRASADO:
             atrasadas.append(item)
-            atrasos_por_cliente[_nome_cliente(t)].append(item)
+            atrasos_por_cliente[cli_nome].append(item)
             atrasos_por_resp[_responsavel(t)] += 1
+            bloco["atrasadas"].append(item)
 
         if col_id in COLUNA_HOJE:
             vencendo_hoje.append(item)
+            bloco["vencimento_hoje"].append(item)
         if col_id in COLUNA_AMANHA:
             vencendo_amanha.append(item)
+            bloco["vencimento_amanha"].append(item)
         if col_id in COLUNA_SEMANA:
             vencendo_semana.append(item)
+            bloco["vencimento_semana"].append(item)
         if col_id in COLUNA_AGUARDANDO:
             aguardando_cliente.append(item)
+            bloco["aguardando"].append(item)
         if col_id in COLUNA_ENTRADA:
             entrada.append(item)
+            bloco["entrada"].append(item)
         if col_id in COLUNA_ACOMPANHAMENTO:
             acompanhamento.append(item)
+            bloco["acompanhamento"].append(item)
         if col_id in COLUNA_VALIDACAO or "desenvolv" in col_id:
             em_dev.append(item)
 
@@ -165,6 +191,60 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
             return 0
 
     atrasadas.sort(key=_dias, reverse=True)
+
+    # Serializa por_cliente: métricas + projetos; só clientes com fila ativa
+    gestao_por_cliente: list[dict[str, Any]] = []
+    for nome, bloco in por_cliente.items():
+        for chave in (
+            "atrasadas",
+            "vencimento_hoje",
+            "vencimento_amanha",
+            "vencimento_semana",
+        ):
+            bloco[chave].sort(key=_dias, reverse=True)
+        n_atr = len(bloco["atrasadas"])
+        n_hoje = len(bloco["vencimento_hoje"])
+        n_amanha = len(bloco["vencimento_amanha"])
+        n_semana = len(bloco["vencimento_semana"])
+        n_aguard = len(bloco["aguardando"])
+        if not (n_atr or n_hoje or n_amanha or n_semana or n_aguard):
+            continue
+        # Planejamento da semana = filas ativas da semana (hoje + amanhã + semana)
+        planejamento = (
+            list(bloco["vencimento_hoje"])
+            + list(bloco["vencimento_amanha"])
+            + list(bloco["vencimento_semana"])
+        )
+        gestao_por_cliente.append(
+            {
+                "cliente": nome,
+                "projetos": sorted(bloco["projetos"]),
+                "atrasadas": bloco["atrasadas"][:25],
+                "vencimento_hoje": bloco["vencimento_hoje"][:20],
+                "vencimento_amanha": bloco["vencimento_amanha"][:15],
+                "vencimento_semana": bloco["vencimento_semana"][:20],
+                "aguardando": bloco["aguardando"][:10],
+                "entrada": bloco["entrada"][:8],
+                "acompanhamento": bloco["acompanhamento"][:8],
+                "planejamento_semana": planejamento[:30],
+                "metricas": {
+                    "atrasadas": n_atr,
+                    "hoje": n_hoje,
+                    "amanha": n_amanha,
+                    "semana": n_semana,
+                    "aguardando": n_aguard,
+                    "projetos": len(bloco["projetos"]),
+                },
+            }
+        )
+    gestao_por_cliente.sort(
+        key=lambda c: (
+            -int((c.get("metricas") or {}).get("atrasadas") or 0),
+            -int((c.get("metricas") or {}).get("hoje") or 0),
+            -int((c.get("metricas") or {}).get("semana") or 0),
+            str(c.get("cliente") or ""),
+        )
+    )
 
     clientes_risco: list[dict[str, Any]] = []
     for c in clientes:
@@ -248,6 +328,7 @@ def _agregar_gestao(dados: dict[str, Any]) -> dict[str, Any]:
             k: v[:15] for k, v in sorted(atrasos_por_cliente.items(), key=lambda kv: -len(kv[1]))[:20]
         },
         "atrasos_por_responsavel": dict(atrasos_por_resp.most_common(20)),
+        "por_cliente": gestao_por_cliente,
         "em_desenvolvimento_amostra": em_dev[:30],
         "vencimento_hoje": vencendo_hoje[:20],
         "vencimento_amanha": vencendo_amanha[:20],
@@ -300,17 +381,22 @@ def _sanear_chatwoot_no_snapshot(dados: dict[str, Any]) -> dict[str, Any]:
 
 def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
     """Monta o snapshot consolidado a partir das coletas brutas."""
+    from app.services.tempo import carimbo_relatorio
+
     gestao = coletas.get("gestao")
     painel = coletas.get("painel")
     chatwoot = coletas.get("chatwoot")
-    waha = coletas.get("waha")
+    carimbo = carimbo_relatorio()
 
     snapshot: dict[str, Any] = {
-        "gerado_em": datetime.now(timezone.utc).isoformat(),
+        "gerado_em": carimbo["gerado_em"],
+        "dia_operacional": carimbo["dia_operacional"],
+        "dia_operacional_br": carimbo["dia_operacional_br"],
+        "fuso": carimbo["fuso"],
         "escopo": (
             "Relatório consolidado do ecossistema Infinity: "
-            "Gestão (tarefas/atrasos), Hub de Status (serviços/clientes), "
-            "WAHA (sessões WhatsApp), Chatwoot (s/ resposta IA / reprocess)."
+            "Gestão por cliente (atrasos/hoje/semana), Hub de Status, "
+            "Chatwoot (s/ resposta IA / reprocess do dia)."
         ),
         "fontes": {
             "gestao": {"status": gestao["status"] if gestao else "ausente", "fonte": gestao["fonte"] if gestao else None},
@@ -319,12 +405,10 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
                 "status": chatwoot["status"] if chatwoot else "ausente",
                 "fonte": chatwoot["fonte"] if chatwoot else None,
             },
-            "waha": {"status": waha["status"] if waha else "ausente", "fonte": waha["fonte"] if waha else None},
         },
         "gestao": None,
         "painel": None,
         "chatwoot": None,
-        "waha": None,
         "reprocessamento": None,
         "alertas": [],
     }
@@ -360,7 +444,7 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
                 snapshot["alertas"].append(f"Hub de Status — saúde geral: {saude}.")
             n_prob = int(tot.get("com_problema") or 0) or len(dados.get("servicos_problema") or [])
             if n_prob > 0:
-                snapshot["alertas"].append(f"{n_prob} item(ns) com problema no Hub (serviço/WAHA).")
+                snapshot["alertas"].append(f"{n_prob} item(ns) com problema no Hub.")
             clientes_p = dados.get("clientes_problema") or []
             n_cli = int(tot.get("clientes_problema") or 0) or len(clientes_p)
             if n_cli > 0:
@@ -372,19 +456,11 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
                         alertas_hub.append(a.get("texto") or a.get("log") or str(a))
                     else:
                         alertas_hub.append(str(a))
-            # Sessões WAHA reais vêm do collector WAHA — ignora alerta Hub desatualizado.
-            waha_vivo = bool(
-                waha
-                and waha.get("status") == "ok"
-                and isinstance(waha.get("dados"), dict)
-                and (waha["dados"].get("totais") or {})
-            )
             for a in alertas_hub[:8]:
                 texto = str(a)
                 t = texto.lower()
-                if waha_vivo and "waha" in t and any(
-                    k in t for k in ("não configur", "nao configur", "indispon", "pendente")
-                ):
+                # WAHA saiu do monitor — ignora ruído do Hub sobre sessões/números
+                if "waha" in t or "números (waha)" in t or "numeros (waha)" in t:
                     continue
                 snapshot["alertas"].append(f"Hub: {texto}")
 
@@ -411,23 +487,6 @@ def agregar(coletas: dict[str, ColetaResult]) -> dict[str, Any]:
                 snapshot["alertas"].append(
                     f"{n_pau} lead(s) s/ resposta com etiqueta de pausa — não reprocessar."
                 )
-
-    if waha:
-        snapshot["waha"] = waha["dados"]
-        if waha["status"] == "stub":
-            snapshot["alertas"].append("Monitoramento de sessões WAHA desligado (stub).")
-        elif waha["status"] == "erro":
-            snapshot["alertas"].append(f"WAHA com erro: {waha['dados'].get('erro')}")
-        elif waha["status"] == "ok":
-            tot = (waha["dados"] or {}).get("totais") or {}
-            n_ok = int(tot.get("working") or 0)
-            n_ruim = int(tot.get("ruins") or 0)
-            n_tot = int(tot.get("total") or 0)
-            snapshot["alertas"].append(
-                f"WAHA: {n_ok} WORKING / {n_ruim} ruins / {n_tot} total."
-            )
-            if n_ruim > 0:
-                snapshot["alertas"].append(f"{n_ruim} sessão(ões) WAHA fora de WORKING.")
 
     from app.services.report_md import ordenar_alertas_por_criticidade
 

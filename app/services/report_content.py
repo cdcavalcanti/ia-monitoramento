@@ -100,8 +100,8 @@ def _cw(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def _waha(snapshot: dict[str, Any]) -> dict[str, Any]:
-    w = snapshot.get("waha")
-    return w if isinstance(w, dict) else {}
+    """WAHA removido do monitor — mantido só por compat com snapshots antigos."""
+    return {}
 
 
 def metricas_base(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -109,10 +109,8 @@ def metricas_base(snapshot: dict[str, Any]) -> dict[str, Any]:
     painel = _painel(snapshot)
     cw_raw = _cw(snapshot)
     cw = sanear_chatwoot_somente_hoje(cw_raw) if cw_raw else {}
-    waha = _waha(snapshot)
     tot = gestao.get("totais") if isinstance(gestao.get("totais"), dict) else {}
     kanban = tot.get("kanban") if isinstance(tot.get("kanban"), dict) else {}
-    wt = waha.get("totais") if isinstance(waha.get("totais"), dict) else {}
     ct = cw.get("totais") if isinstance(cw.get("totais"), dict) else {}
 
     elegiveis = list(cw.get("leads_elegiveis_reprocessamento") or cw.get("elegiveis") or [])
@@ -124,9 +122,6 @@ def metricas_base(snapshot: dict[str, Any]) -> dict[str, Any]:
     n_amanha = _int(kanban.get("amanha"), _int(tot.get("vencimento_amanha")))
     n_semana = _int(kanban.get("semana"), _int(tot.get("vencimento_semana")))
     n_aguard = _int(kanban.get("aguardando"), _int(tot.get("aguardando_cliente")))
-    n_working = _int(wt.get("working"))
-    n_ruins = _int(wt.get("ruins"))
-    n_total_w = _int(wt.get("total"), n_working + n_ruins)
 
     saude = (
         (painel.get("totais") or {}).get("saudeGeral")
@@ -139,27 +134,29 @@ def metricas_base(snapshot: dict[str, Any]) -> dict[str, Any]:
 
     repro = snapshot.get("reprocessamento") if isinstance(snapshot.get("reprocessamento"), dict) else {}
     n_repro_dia = _int(repro.get("enviados"), 0)
+    n_clientes_ativos = len(gestao_por_cliente(gestao, limite=200))
 
     return {
         "gestao": gestao,
         "painel": painel,
         "cw": cw,
-        "waha": waha,
+        "waha": {},
         "tot": tot,
         "kanban": kanban,
-        "wt": wt,
+        "wt": {},
         "ct": ct,
         "n_atr": n_atr,
         "n_hoje": n_hoje,
         "n_amanha": n_amanha,
         "n_semana": n_semana,
         "n_aguard": n_aguard,
-        "n_working": n_working,
-        "n_ruins": n_ruins,
-        "n_total_w": n_total_w,
+        "n_working": 0,
+        "n_ruins": 0,
+        "n_total_w": 0,
         "n_el": n_el,
         "n_pau": n_pau,
         "n_repro_dia": n_repro_dia,
+        "n_clientes_ativos": n_clientes_ativos,
         "elegiveis": elegiveis,
         "pausados": pausados,
         "saude": saude,
@@ -190,6 +187,126 @@ def tabela_atrasos_detalhe(gestao: dict[str, Any], *, limite: int = 40) -> list[
     return rows
 
 
+def gestao_por_cliente(gestao: dict[str, Any], *, limite: int = 30) -> list[dict[str, Any]]:
+    """Blocos já agregados por cliente (atrasos / hoje / semana)."""
+    blocos = list(gestao.get("por_cliente") or [])
+    out: list[dict[str, Any]] = []
+    for b in blocos:
+        if isinstance(b, dict):
+            out.append(b)
+        if len(out) >= limite:
+            break
+    if out:
+        return out
+    # Fallback: monta a partir das filas planas (snapshots antigos)
+    return _gestao_por_cliente_fallback(gestao, limite=limite)
+
+
+def _gestao_por_cliente_fallback(gestao: dict[str, Any], *, limite: int = 30) -> list[dict[str, Any]]:
+    from collections import defaultdict
+
+    bags: dict[str, dict[str, list]] = defaultdict(
+        lambda: {
+            "atrasadas": [],
+            "vencimento_hoje": [],
+            "vencimento_amanha": [],
+            "vencimento_semana": [],
+            "aguardando": [],
+            "projetos": set(),
+        }
+    )
+
+    def _push(chave: str, itens: list[Any]) -> None:
+        for t in itens or []:
+            if not isinstance(t, dict):
+                continue
+            nome = str(t.get("cliente") or "?").strip() or "?"
+            bags[nome][chave].append(t)
+            proj = str(t.get("projeto") or "").strip()
+            if proj:
+                bags[nome]["projetos"].add(proj)
+
+    _push("atrasadas", list(gestao.get("atrasadas_top") or []))
+    _push("vencimento_hoje", list(gestao.get("vencimento_hoje") or []))
+    _push("vencimento_amanha", list(gestao.get("vencimento_amanha") or []))
+    _push("vencimento_semana", list(gestao.get("vencimento_semana") or []))
+    _push("aguardando", list(gestao.get("aguardando_cliente") or []))
+
+    # Se não veio atrasadas_top, espalha atrasos_por_cliente
+    if not any(bags[n]["atrasadas"] for n in bags):
+        por = gestao.get("atrasos_por_cliente")
+        if isinstance(por, dict):
+            for nome, itens in por.items():
+                if not isinstance(itens, list):
+                    continue
+                for t in itens:
+                    if isinstance(t, dict):
+                        bags[str(nome)]["atrasadas"].append(t)
+                        proj = str(t.get("projeto") or "").strip()
+                        if proj:
+                            bags[str(nome)]["projetos"].add(proj)
+
+    result: list[dict[str, Any]] = []
+    for nome, bloco in bags.items():
+        n_atr = len(bloco["atrasadas"])
+        n_hoje = len(bloco["vencimento_hoje"])
+        n_amanha = len(bloco["vencimento_amanha"])
+        n_semana = len(bloco["vencimento_semana"])
+        n_aguard = len(bloco["aguardando"])
+        if not (n_atr or n_hoje or n_amanha or n_semana or n_aguard):
+            continue
+        plan = (
+            list(bloco["vencimento_hoje"])
+            + list(bloco["vencimento_amanha"])
+            + list(bloco["vencimento_semana"])
+        )
+        result.append(
+            {
+                "cliente": nome,
+                "projetos": sorted(bloco["projetos"]),
+                "atrasadas": bloco["atrasadas"][:25],
+                "vencimento_hoje": bloco["vencimento_hoje"][:20],
+                "vencimento_amanha": bloco["vencimento_amanha"][:15],
+                "vencimento_semana": bloco["vencimento_semana"][:20],
+                "aguardando": bloco["aguardando"][:10],
+                "planejamento_semana": plan[:30],
+                "metricas": {
+                    "atrasadas": n_atr,
+                    "hoje": n_hoje,
+                    "amanha": n_amanha,
+                    "semana": n_semana,
+                    "aguardando": n_aguard,
+                    "projetos": len(bloco["projetos"]),
+                },
+            }
+        )
+    result.sort(
+        key=lambda c: (
+            -int((c.get("metricas") or {}).get("atrasadas") or 0),
+            -int((c.get("metricas") or {}).get("hoje") or 0),
+            str(c.get("cliente") or ""),
+        )
+    )
+    return result[:limite]
+
+
+def _tarefa_row_curta(t: dict[str, Any], *, com_dias: bool = False) -> list[str]:
+    proj = str(t.get("projeto") or "?")[:28]
+    resp = str(t.get("responsavel") or "?")[:20]
+    titulo = str(t.get("titulo") or "?")[:48]
+    if com_dias:
+        return [proj, resp, f"{t.get('diasAtraso') or 0}d", titulo]
+    return [proj, resp, titulo]
+
+
+def tarefas_rows(itens: list[Any], *, com_dias: bool = False, limite: int = 15) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for t in list(itens or [])[:limite]:
+        if isinstance(t, dict):
+            rows.append(_tarefa_row_curta(t, com_dias=com_dias))
+    return rows
+
+
 
 def scorecard_dominios(m: dict[str, Any]) -> list[dict[str, str]]:
     """Estado por domínio para o panorama."""
@@ -215,16 +332,6 @@ def scorecard_dominios(m: dict[str, Any]) -> list[dict[str, str]]:
     else:
         st, det = "ok", f"saude {m['saude']}"
     rows.append({"dominio": "Hub de Status", "estado": st, "destaque": det})
-
-    # WAHA
-    pct = round(100.0 * m["n_working"] / m["n_total_w"]) if m["n_total_w"] else 0
-    if m["n_ruins"] >= 10 or (m["n_total_w"] and pct < 50):
-        st, det = "critico", f"{m['n_working']} WORKING / {m['n_ruins']} ruins ({pct}% ok)"
-    elif m["n_ruins"]:
-        st, det = "atencao", f"{m['n_working']} WORKING / {m['n_ruins']} ruins ({pct}% ok)"
-    else:
-        st, det = "ok", f"{m['n_working']} sessao(oes) WORKING"
-    rows.append({"dominio": "WAHA", "estado": st, "destaque": det})
 
     # Chatwoot
     if m["n_el"] >= 8:
@@ -252,9 +359,10 @@ def panorama_paragrafos(m: dict[str, Any]) -> list[str]:
     top_resp = list(por_resp.items())[:3] if por_resp else []
 
     p1_parts = [
-        f"Panorama do periodo: Gestao com {m['n_atr']} tarefa(s) na coluna Atrasado, "
-        f"{m['n_hoje']} com vencimento hoje e {m['n_amanha']} amanha"
-        f" ({m['n_aguard']} aguardando cliente)."
+        f"Panorama do periodo: Gestao com {m['n_atr']} tarefa(s) atrasada(s), "
+        f"{m['n_hoje']} com vencimento hoje, {m['n_amanha']} amanha e {m['n_semana']} na semana"
+        f" ({m['n_aguard']} aguardando cliente) — "
+        f"{m.get('n_clientes_ativos') or 0} cliente(s) com fila ativa."
     ]
     if top_cli:
         cli_txt = ", ".join(f"{nome} ({len(itens)})" for nome, itens in top_cli if isinstance(itens, list))
@@ -263,12 +371,10 @@ def panorama_paragrafos(m: dict[str, Any]) -> list[str]:
         resp_txt = ", ".join(f"{nome} ({qtd})" for nome, qtd in top_resp)
         p1_parts.append(f"Responsaveis com mais atraso: {resp_txt}.")
 
-    pct = round(100.0 * m["n_working"] / m["n_total_w"]) if m["n_total_w"] else 0
     p2 = (
         f"Operacao de canais: Hub em '{m['saude']}' com {len(m['clientes_hub'])} cliente(s) "
-        f"parcial/offline; WAHA {m['n_working']}/{m['n_total_w']} WORKING ({pct}%); "
-        f"Chatwoot com {m['n_el']} lead(s) elegivel(is) a reprocessar "
-        f"(somente silêncio de hoje) e {m['n_pau']} pausado(s)/handoff."
+        f"parcial/offline; Chatwoot com {m['n_el']} lead(s) elegivel(is) a reprocessar "
+        f"(somente silencio de hoje) e {m['n_pau']} pausado(s)/handoff."
     )
 
     # Contas CW quentes
@@ -388,17 +494,6 @@ def acoes_consolidadas(m: dict[str, Any]) -> list[tuple[str, str]]:
         suf = f" Contas: {foco}." if foco else ""
         acoes.append(
             (f"P0 Chatwoot — Revisar {m['n_el']} elegivel(is) (somente hoje){suf}", "warn")
-        )
-
-    if m["n_ruins"]:
-        by = waha_por_status(m["waha"])
-        st_txt = ", ".join(f"{st}={n}" for st, n in by[:4])
-        acoes.append(
-            (
-                f"P1 WAHA — Recuperar {m['n_ruins']} sessao(oes) fora de WORKING "
-                f"({st_txt}); {m['n_working']} WORKING estavel.",
-                "bad",
-            )
         )
 
     if m["clientes_hub"]:

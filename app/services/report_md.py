@@ -55,19 +55,9 @@ def criticidade_alerta(texto: str) -> int:
 
 
 def alerta_hub_waha_desatualizado(texto: str) -> bool:
-    """Hub às vezes diz 'WAHA não configurada' mesmo com sessões ok no monitor."""
+    """Filtra qualquer menção WAHA do Hub (WAHA saiu do monitor)."""
     t = str(texto).lower()
-    if "waha" not in t and "números (waha)" not in t and "numeros (waha)" not in t:
-        return False
-    return any(
-        k in t
-        for k in (
-            "não configur",
-            "nao configur",
-            "indispon",
-            "pendente",
-        )
-    )
+    return "waha" in t or "números (waha)" in t or "numeros (waha)" in t
 
 
 def ordenar_alertas_por_criticidade(alertas: list[Any]) -> list[str]:
@@ -78,17 +68,12 @@ def ordenar_alertas_por_criticidade(alertas: list[Any]) -> list[str]:
 def filtrar_alertas_hub(
     alertas: list[Any],
     *,
-    waha_ok: bool,
+    waha_ok: bool = True,
 ) -> list[str]:
     out: list[str] = []
     for a in alertas:
         texto = a.get("texto") or a.get("log") or str(a) if isinstance(a, dict) else str(a)
-        # Nunca levar alerta Hub de WAHA "não configurada" para o relatório.
         if alerta_hub_waha_desatualizado(texto):
-            continue
-        if waha_ok and "waha" in str(texto).lower() and any(
-            k in str(texto).lower() for k in ("não configur", "nao configur", "pendente")
-        ):
             continue
         out.append(texto)
     return out
@@ -98,23 +83,25 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
     """Relatório consolidado (escaneável) — números do snapshot."""
     from app.services.report_content import (
         acoes_consolidadas,
-        atrasos_por_cliente_rows,
-        atrasos_por_resp_rows,
         contas_cw_rows,
+        gestao_por_cliente,
         metricas_base,
         panorama_paragrafos,
         scorecard_dominios,
-        waha_por_status,
+        tarefas_rows,
     )
 
     m = metricas_base(snapshot)
     fontes = snapshot.get("fontes") or {}
-    gestao, painel, cw, waha = m["gestao"], m["painel"], m["cw"], m["waha"]
-    tot, kanban = m["tot"], m["kanban"]
+    gestao, painel, cw = m["gestao"], m["painel"], m["cw"]
+    tot = m["tot"]
     repro = snapshot.get("reprocessamento") if isinstance(snapshot.get("reprocessamento"), dict) else {}
-    wt = m["wt"]
 
-    waha_ok = m["n_working"] > 0 or m["n_total_w"] > 0
+    from app.services.tempo import carimbo_relatorio, hoje_br
+
+    carimbo = carimbo_relatorio()
+    dia_br = hoje_br()
+
     alertas_raw = list(snapshot.get("alertas") or [])
     alertas = [
         a
@@ -125,7 +112,8 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
     linhas: list[str] = [
         "# Relatório consolidado — Infinity Monitor",
         "",
-        f"_Gerado em {snapshot.get('gerado_em') or '—'} · rótulo: {snapshot.get('rotulo') or 'manual'}_",
+        f"**HOJE: {dia_br}** (America/Sao_Paulo) · gerado {carimbo['gerado_em_br']} · "
+        f"rótulo: {snapshot.get('rotulo') or 'manual'}",
         "",
         "---",
         "",
@@ -148,81 +136,59 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
     linhas += ["", "### Sinais por criticidade", ""]
     linhas.extend(_bullets([f"- {a}" for a in alertas[:12]], "- Sem alertas no snapshot."))
 
-    # —— Gestão ——
-    from app.services.report_content import tabela_atrasos_detalhe
-
-    linhas += ["", "---", "", "## 2. Gestão Infinity (kanban)", ""]
+    # —— Gestão por cliente ——
+    linhas += ["", "---", "", "## 2. Gestão por cliente", ""]
     if tot:
         linhas += [
-            "Contagens **por coluna do painel**:",
-            "",
-            f"| Coluna | Qtd |",
-            f"| --- | ---: |",
-            f"| Entrada de tarefas | {_n(kanban.get('entrada'), 0)} |",
-            f"| Acompanhamento | {_n(kanban.get('acompanhamento'), 0)} |",
-            f"| **Atrasado** | **{m['n_atr']}** |",
-            f"| Vencimento hoje | {m['n_hoje']} |",
-            f"| Vencimento amanhã | {m['n_amanha']} |",
-            f"| Vencimento essa semana | {m['n_semana']} |",
-            f"| Validação | {_n(kanban.get('validacao'), 0)} |",
-            f"| Aguardando cliente | {m['n_aguard']} |",
-            f"| Entregues (histórico) | {_n(kanban.get('entregues'), 0)} |",
-            "",
-            f"Total de tarefas na API: **{_n(tot.get('tarefas'))}**.",
-            "",
-            "### Atrasos — detalhe (cliente · projeto · responsável · dias · motivo)",
+            f"Totais do kanban: **{m['n_atr']}** atrasada(s) · **{m['n_hoje']}** hoje · "
+            f"**{m['n_amanha']}** amanhã · **{m['n_semana']}** na semana · "
+            f"**{m['n_aguard']}** aguardando · "
+            f"**{m.get('n_clientes_ativos') or 0}** cliente(s) com fila ativa "
+            f"(API: {_n(tot.get('tarefas'))} tarefas).",
             "",
         ]
-        atr_rows = tabela_atrasos_detalhe(gestao, limite=40)
-        if atr_rows:
-            # prioriza tabela sem motivo vazio ocupando coluna
-            tem_motivo = any(str(r[4]).strip() not in ("", "-", "—", "–") for r in atr_rows)
-            if tem_motivo:
+        blocos = gestao_por_cliente(gestao, limite=25)
+        if not blocos:
+            linhas.append("- Nenhum cliente com atraso / hoje / semana no snapshot.")
+        for bloco in blocos:
+            met = bloco.get("metricas") or {}
+            nome = bloco.get("cliente") or "?"
+            projetos = list(bloco.get("projetos") or [])
+            linhas += [
+                f"### {nome}",
+                "",
+                f"- **Projetos:** {', '.join(projetos) if projetos else '—'}",
+                f"- **Filas:** {met.get('atrasadas', 0)} atrasada(s) · "
+                f"{met.get('hoje', 0)} hoje · {met.get('amanha', 0)} amanhã · "
+                f"{met.get('semana', 0)} na semana · {met.get('aguardando', 0)} aguardando",
+                "",
+            ]
+
+            atr = list(bloco.get("atrasadas") or [])
+            if atr:
                 linhas += [
-                    "| Cliente | Projeto | Responsável | Dias | Motivo | Tarefa |",
-                    "| --- | --- | --- | ---: | --- | --- |",
-                ]
-                for r in atr_rows:
-                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} | {r[5]} |")
-            else:
-                linhas += [
-                    f"**{m['n_atr']} atrasada(s)**",
+                    "#### Atrasadas — resolver",
                     "",
-                    "| Cliente | Projeto | Responsável | Dias | Tarefa |",
-                    "| --- | --- | --- | ---: | --- |",
+                    "| Projeto | Responsável | Dias | Tarefa |",
+                    "| --- | --- | ---: | --- |",
                 ]
-                for r in atr_rows:
-                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[5]} |")
-            linhas.append("")
-            linhas.append("_Motivo ainda não preenchido na Gestão (obrigatório em breve)._")
-        else:
-            linhas.append("- Nenhuma tarefa na coluna Atrasado.")
+                for r in tarefas_rows(atr, com_dias=True, limite=15):
+                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} |")
+                linhas.append("")
 
-        linhas += ["", "### Concentração (resumo)", ""]
-        cli_rows = atrasos_por_cliente_rows(gestao, limite=8)
-        if cli_rows:
-            linhas += ["| Cliente | Qtd | Maior atraso |", "| --- | ---: | --- |"]
-            for r in cli_rows:
-                linhas.append(f"| {r[0]} | {r[1]} | {r[2]} |")
-        resp_rows = atrasos_por_resp_rows(gestao)
-        if resp_rows:
-            linhas += ["", "| Responsável | Qtd |", "| --- | ---: |"]
-            for r in resp_rows:
-                linhas.append(f"| {r[0]} | {r[1]} |")
-
-        linhas += ["", "### Acompanhamento — vence hoje / amanhã", ""]
-        for titulo, chave in (
-            ("Hoje", "vencimento_hoje"),
-            ("Amanhã", "vencimento_amanha"),
-        ):
-            itens = list(gestao.get(chave) or [])
-            linhas.append(f"- **{titulo}:** {len(itens)}")
-            for t in itens[:5]:
-                linhas.append(
-                    f"  - {t.get('cliente')} · {t.get('projeto')} · {t.get('titulo')} — {t.get('responsavel')}"
-                )
-            if len(itens) > 5:
-                linhas.append(f"  - +{len(itens) - 5} no kanban")
+            plan = list(bloco.get("planejamento_semana") or [])
+            if plan:
+                linhas += [
+                    "#### Planejamento da semana (hoje · amanhã · semana)",
+                    "",
+                    "| Projeto | Responsável | Tarefa |",
+                    "| --- | --- | --- |",
+                ]
+                for r in tarefas_rows(plan, com_dias=False, limite=12):
+                    linhas.append(f"| {r[0]} | {r[1]} | {r[2]} |")
+                if len(plan) > 12:
+                    linhas.append(f"| … | … | +{len(plan) - 12} no kanban |")
+                linhas.append("")
     elif gestao.get("erro"):
         linhas.append(f"- Erro Gestão: {gestao.get('erro')}")
     else:
@@ -236,7 +202,7 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
     alertas_hub_raw = list(painel.get("alertas_api") or [])
     if not alertas_hub_raw and isinstance(painel.get("alertas"), list):
         alertas_hub_raw = list(painel["alertas"])
-    alertas_hub = filtrar_alertas_hub(alertas_hub_raw, waha_ok=waha_ok)
+    alertas_hub = filtrar_alertas_hub(alertas_hub_raw)
     linhas.append("### Alertas do Hub")
     linhas.append("")
     if alertas_hub:
@@ -268,36 +234,8 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
     else:
         linhas.append("- Lista detalhada indisponível; ver alertas do Hub acima.")
 
-    # —— WAHA ——
-    linhas += ["", "---", "", "## 4. WAHA (sessões WhatsApp)", ""]
-    pct = round(100.0 * m["n_working"] / m["n_total_w"]) if m["n_total_w"] else 0
-    linhas += [
-        f"- **WORKING:** {m['n_working']}",
-        f"- **Ruins / atenção:** {m['n_ruins']}",
-        f"- **Total sessões:** {m['n_total_w']}",
-        f"- **% OK:** {pct}%",
-        "",
-    ]
-    by_st = waha_por_status(waha)
-    if by_st:
-        linhas += ["### Distribuição dos ruins", ""]
-        for st, n in by_st:
-            linhas.append(f"- `{st}`: {n}")
-        linhas.append("")
-    ruin_list = list(waha.get("ruins") or [])[:18]
-    if ruin_list:
-        linhas.append(f"### Sessões fora de WORKING (amostra {len(ruin_list)})")
-        linhas.append("")
-        for s in ruin_list:
-            if isinstance(s, dict):
-                linhas.append(
-                    f"- **{s.get('name') or s.get('nome')}** · status `{s.get('status')}`"
-                )
-            else:
-                linhas.append(f"- {s}")
-
     # —— Chatwoot (SÓ HOJE) ——
-    linhas += ["", "---", "", "## 5. Chatwoot — reprocessamento do dia", ""]
+    linhas += ["", "---", "", "## 4. Chatwoot — reprocessamento do dia", ""]
     limiar = _n(cw.get("silencio_minutos"), 5)
     if cw.get("aviso_dia"):
         linhas.append(f"- **Aviso:** {cw.get('aviso_dia')}")
@@ -350,24 +288,23 @@ def montar_relatorio(snapshot: dict[str, Any]) -> str:
     if repro.get("nota"):
         linhas.append(f"- Nota: {repro.get('nota')}")
 
-
     # —— Ações ——
-    linhas += ["", "---", "", "## 6. Plano de ação consolidado", ""]
-    linhas.append(
-        "_Prioridades derivadas do cruzamento Gestão + Hub + WAHA + Chatwoot._"
-    )
+    linhas += ["", "---", "", "## 5. Plano de ação consolidado", ""]
+    linhas.append("_Prioridades derivadas do cruzamento Gestão por cliente + Hub + Chatwoot._")
     linhas.append("")
     for text, _tone in acoes_consolidadas(m):
         linhas.append(f"- {text}")
 
     # —— Fontes ——
-    linhas += ["", "---", "", "## 7. Fontes e frescor", ""]
+    linhas += ["", "---", "", "## 6. Fontes e frescor", ""]
     for nome, info in fontes.items():
+        if str(nome).lower() == "waha":
+            continue
         if isinstance(info, dict):
             linhas.append(f"- {nome}: **{info.get('status')}**")
         else:
             linhas.append(f"- {nome}: {info}")
-    for nome, bloco in (("Hub", painel), ("WAHA", waha), ("Chatwoot", cw)):
+    for nome, bloco in (("Hub", painel), ("Chatwoot", cw)):
         if isinstance(bloco, dict) and (bloco.get("atualizado_em") or bloco.get("origem")):
             linhas.append(
                 f"- {nome} atualizado: {bloco.get('atualizado_em') or '—'} · "

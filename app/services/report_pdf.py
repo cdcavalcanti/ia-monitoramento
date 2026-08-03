@@ -57,6 +57,14 @@ def _fmt_quando(iso: str | None) -> str:
         return _safe(iso)[:19]
 
 
+def _carimbo_cabecalho(snapshot: dict[str, Any]) -> tuple[str, str]:
+    """(dia_br, gerado_br) — dia de HOJE no fuso SP no momento da geração do PDF."""
+    from app.services.tempo import carimbo_relatorio, hoje_br
+
+    agora = carimbo_relatorio()
+    return hoje_br(), agora["gerado_em_br"]
+
+
 def _n(v: Any, default: int | str = 0) -> Any:
     return default if v is None else v
 
@@ -442,14 +450,12 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
 
     from app.services.report_content import (
         acoes_consolidadas,
-        atrasos_por_cliente_rows,
-        atrasos_por_resp_rows,
         contas_cw_rows,
+        gestao_por_cliente,
         metricas_base,
         panorama_paragrafos,
         scorecard_dominios,
-        tabela_atrasos_detalhe,
-        waha_por_status,
+        tarefas_rows,
     )
     from app.services.report_md import (
         alerta_hub_waha_desatualizado,
@@ -459,11 +465,10 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
     )
 
     m = metricas_base(snapshot)
-    gestao, painel, cw, waha = m["gestao"], m["painel"], m["cw"], m["waha"]
-    tot, kanban = m["tot"], m["kanban"]
+    gestao, painel, cw = m["gestao"], m["painel"], m["cw"]
+    tot = m["tot"]
     fontes = snapshot.get("fontes") or {}
     repro = snapshot.get("reprocessamento") if isinstance(snapshot.get("reprocessamento"), dict) else {}
-    waha_ok = m["n_working"] > 0 or m["n_total_w"] > 0
 
     alertas = [
         a
@@ -473,9 +478,10 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
 
     doc = RelatorioPDF()
     rotulo = snapshot.get("rotulo") or "manual"
+    dia_br, gerado_br = _carimbo_cabecalho(snapshot)
     doc.header_band(
         "Relatorio operacional consolidado",
-        f"Gerado {_fmt_quando(snapshot.get('gerado_em'))}  |  fuso America/Sao_Paulo  |  {rotulo}",
+        f"HOJE {dia_br}  |  Gerado {gerado_br}  |  fuso America/Sao_Paulo  |  {rotulo}",
     )
 
     # KPIs topo
@@ -483,8 +489,8 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
         [
             ("Atrasadas", str(m["n_atr"]), "bad" if m["n_atr"] else "ok"),
             ("Vence hoje", str(m["n_hoje"]), "warn" if m["n_hoje"] else "ok"),
-            ("WAHA OK", str(m["n_working"]), "ok" if m["n_working"] else "warn"),
-            ("WAHA ruins", str(m["n_ruins"]), "bad" if m["n_ruins"] else "ok"),
+            ("Na semana", str(m["n_semana"]), "info"),
+            ("Clientes", str(m.get("n_clientes_ativos") or 0), "info"),
             ("CW elegiveis", str(m["n_el"]), "warn" if m["n_el"] else "ok"),
         ]
     )
@@ -510,82 +516,64 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
     else:
         doc.bullet("Sem alertas agregados no snapshot.", tone="ok")
 
-    # —— 2. Gestão ——
-    doc.section("2. Gestao Infinity (kanban)", VIOLET)
+    # —— 2. Gestão por cliente ——
+    doc.section("2. Gestao por cliente", VIOLET)
     if tot:
-        doc.para(f"Total tarefas API: {_n(tot.get('tarefas'))}", size=8.5, bold=True)
-        rows = [
-            ["Entrada de tarefas", str(_n(kanban.get("entrada"), 0))],
-            ["Acompanhamento", str(_n(kanban.get("acompanhamento"), 0))],
-            ["Atrasado", str(m["n_atr"])],
-            ["Vencimento hoje", str(m["n_hoje"])],
-            ["Vencimento amanha", str(m["n_amanha"])],
-            ["Vencimento essa semana", str(m["n_semana"])],
-            ["Validacao", str(_n(kanban.get("validacao"), 0))],
-            ["Aguardando cliente", str(m["n_aguard"])],
-            ["Entregues (historico)", str(_n(kanban.get("entregues"), 0))],
-        ]
-        doc.table(["Coluna", "Qtd"], rows, col_weights=[3.2, 1])
-
-        doc.subsection(f"Atrasos — {m['n_atr']} tarefa(s)", keep_with_mm=40)
-        atr_rows = tabela_atrasos_detalhe(gestao, limite=40)
-        if atr_rows:
-            # Tabela prioritária: Cliente | Projeto | Responsável | Dias | Tarefa
-            # (Motivo entra quando a Gestão começar a preencher)
-            tab = [
-                [r[0], r[1], r[2], r[3], r[5] if len(r) > 5 else r[4]]
-                for r in atr_rows
-            ]
-            # se motivo vier preenchido em algum, inclui a coluna
-            tem_motivo = any(
-                str(r[4]).strip() not in ("", "-", "—", "–") for r in atr_rows if len(r) > 4
+        doc.para(
+            f"Kanban: {m['n_atr']} atrasada(s) · {m['n_hoje']} hoje · {m['n_amanha']} amanha · "
+            f"{m['n_semana']} semana · {m['n_aguard']} aguardando · "
+            f"{m.get('n_clientes_ativos') or 0} cliente(s) ativos "
+            f"(API {_n(tot.get('tarefas'))} tarefas).",
+            size=8.5,
+            bold=True,
+        )
+        blocos = gestao_por_cliente(gestao, limite=20)
+        if not blocos:
+            doc.bullet("Nenhum cliente com fila ativa no snapshot.", tone="ok")
+        for bloco in blocos:
+            met = bloco.get("metricas") or {}
+            nome = str(bloco.get("cliente") or "?")
+            projetos = list(bloco.get("projetos") or [])
+            n_atr_c = int(met.get("atrasadas") or 0)
+            doc.subsection(
+                f"{nome}  |  {n_atr_c} atrasada(s) · {met.get('hoje', 0)} hoje · "
+                f"{met.get('semana', 0)} semana",
+                keep_with_mm=36,
             )
-            if tem_motivo:
-                doc.table(
-                    ["Cliente", "Projeto", "Responsavel", "Dias", "Motivo", "Tarefa"],
-                    atr_rows,
-                    col_weights=[1.3, 1.2, 1.2, 0.55, 1.1, 1.6],
-                )
-            else:
-                doc.table(
-                    ["Cliente", "Projeto", "Responsavel", "Dias", "Tarefa"],
-                    tab,
-                    col_weights=[1.4, 1.3, 1.3, 0.6, 2.0],
-                )
-            doc.para("Motivo ainda nao vem preenchido na Gestao (campo obrigatorio em breve).", size=7)
-        else:
-            doc.bullet("Nenhuma tarefa na coluna Atrasado.", tone="ok")
-
-        doc.subsection("Concentracao (resumo)", keep_with_mm=24)
-        cli_rows = atrasos_por_cliente_rows(gestao, limite=8)
-        if cli_rows:
-            doc.table(
-                ["Cliente", "Qtd", "Maior atraso", "Amostra"],
-                [[r[0], r[1], r[2], r[3]] for r in cli_rows],
-                col_weights=[1.6, 0.6, 0.9, 3.0],
+            doc.para(
+                f"Projetos: {', '.join(projetos[:8]) if projetos else '—'}"
+                + (f" (+{len(projetos) - 8})" if len(projetos) > 8 else ""),
+                size=8,
             )
-        resp_rows = atrasos_por_resp_rows(gestao)
-        if resp_rows:
-            doc.table(["Responsavel", "Qtd"], resp_rows, col_weights=[3.2, 1])
+            doc.chip_row(
+                [
+                    (f"Atrasadas: {met.get('atrasadas', 0)}", "bad" if n_atr_c else "ok"),
+                    (f"Hoje: {met.get('hoje', 0)}", "warn" if met.get("hoje") else "ok"),
+                    (f"Amanha: {met.get('amanha', 0)}", "info"),
+                    (f"Semana: {met.get('semana', 0)}", "info"),
+                    (f"Aguardando: {met.get('aguardando', 0)}", "info"),
+                ]
+            )
 
-        # Hoje / amanhã = acompanhamento (compacto), nao o foco do relatório
-        doc.subsection("Acompanhamento — vence hoje / amanha", keep_with_mm=26)
-        for rotulo_fila, chave in (("Hoje", "vencimento_hoje"), ("Amanha", "vencimento_amanha")):
-            itens = list(gestao.get(chave) or [])
-            total_fila = len(itens)
-            amostra = itens[:5]
-            doc.para(f"{rotulo_fila}: {total_fila}", size=8.5, bold=True)
-            if not amostra:
-                doc.bullet("nenhum.", tone="ok")
-                continue
-            for t in amostra:
-                if not isinstance(t, dict):
-                    continue
-                doc.bullet(
-                    f"{t.get('cliente')} · {t.get('projeto')} · {t.get('titulo')} — {t.get('responsavel')}"
+            atr = list(bloco.get("atrasadas") or [])
+            if atr:
+                doc.para("ATRASADAS — resolver", size=8.5, bold=True)
+                doc.table(
+                    ["Projeto", "Responsavel", "Dias", "Tarefa"],
+                    tarefas_rows(atr, com_dias=True, limite=12),
+                    col_weights=[1.4, 1.2, 0.55, 2.2],
                 )
-            if total_fila > len(amostra):
-                doc.para(f"+{total_fila - len(amostra)} no kanban (ver Gestao).", size=7.5)
+
+            plan = list(bloco.get("planejamento_semana") or [])
+            if plan:
+                doc.para("Planejamento da semana (hoje · amanha · semana)", size=8.5, bold=True)
+                doc.table(
+                    ["Projeto", "Responsavel", "Tarefa"],
+                    tarefas_rows(plan, com_dias=False, limite=10),
+                    col_weights=[1.5, 1.3, 2.5],
+                )
+                if len(plan) > 10:
+                    doc.para(f"+{len(plan) - 10} no kanban deste cliente.", size=7.5)
     else:
         doc.bullet(f"Gestao indisponivel: {gestao.get('erro') or '-'}", tone="bad")
 
@@ -609,7 +597,7 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
     if not alertas_hub_raw:
         for a in painel.get("alertas") or []:
             alertas_hub_raw.append(a)
-    alertas_hub = filtrar_alertas_hub(alertas_hub_raw, waha_ok=waha_ok)
+    alertas_hub = filtrar_alertas_hub(alertas_hub_raw)
     if alertas_hub:
         for a in alertas_hub[:14]:
             doc.bullet(str(a), tone="warn")
@@ -655,47 +643,8 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
             size=8,
         )
 
-    # —— 4. WAHA ——
-    doc.section("4. WAHA (sessoes WhatsApp)", GREEN if not m["n_ruins"] else RED, keep_with_mm=40)
-    pct = round(100.0 * m["n_working"] / m["n_total_w"]) if m["n_total_w"] else 0
-    doc.kpi_row(
-        [
-            ("WORKING", str(m["n_working"]), "ok"),
-            ("Ruins", str(m["n_ruins"]), "bad" if m["n_ruins"] else "ok"),
-            ("Total", str(m["n_total_w"] or "-"), "info"),
-            ("% OK", f"{pct}%", "ok" if pct >= 70 else ("warn" if pct >= 40 else "bad")),
-        ]
-    )
-    by_st = waha_por_status(waha)
-    if by_st:
-        doc.subsection("Distribuicao dos ruins por status")
-        doc.table(
-            ["Status", "Qtd"],
-            [[st, str(n)] for st, n in by_st],
-            col_weights=[2.5, 1],
-        )
-    ruins = list(waha.get("ruins") or [])
-    if ruins:
-        doc.subsection(f"Sessoes fora de WORKING (amostra {min(18, len(ruins))} de {len(ruins)})")
-        for s in ruins[:18]:
-            if isinstance(s, dict):
-                log = str(s.get("log") or "")[:70]
-                extra = f" — {log}" if log else ""
-                doc.bullet(
-                    f"{s.get('name') or s.get('nome')} > {s.get('status')}{extra}",
-                    tone="bad",
-                )
-            else:
-                doc.bullet(str(s), tone="bad")
-    if waha.get("atualizado_em") or waha.get("origem"):
-        doc.para(
-            f"Fonte API WAHA | atualizado {_fmt_quando(waha.get('atualizado_em'))}",
-            size=8,
-        )
-
-    # —— 5. Chatwoot SÓ HOJE ——
-    # keep_with alto: título + KPIs + 1º bloco na mesma página (mesmo fix dos atrasos)
-    doc.section("5. Chatwoot — reprocessamento do dia", BLUE, keep_with_mm=58)
+    # —— 4. Chatwoot SÓ HOJE ——
+    doc.section("4. Chatwoot — reprocessamento do dia", BLUE, keep_with_mm=58)
     limiar = _n(cw.get("silencio_minutos"), 5)
     doc.kpi_row(
         [
@@ -753,19 +702,21 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
         f"status {_n(repro.get('status'), '-')}"
     )
 
-    # —— 6. Ações ——
-    doc.section("6. Plano de acao consolidado", AMBER)
+    # —— 5. Ações ——
+    doc.section("5. Plano de acao consolidado", AMBER)
     doc.para(
-        "Prioridades derivadas do cruzamento Gestao + Hub + WAHA + Chatwoot (mesmos numeros do dash).",
+        "Prioridades derivadas do cruzamento Gestao por cliente + Hub + Chatwoot.",
         size=8.5,
     )
     for text, tone in acoes_consolidadas(m):
         doc.bullet(text, tone=tone if tone != "info" else None)
 
-    # —— 7. Fontes ——
-    doc.section("7. Fontes e frescor", MUTED)
+    # —— 6. Fontes ——
+    doc.section("6. Fontes e frescor", MUTED)
     chips = []
     for nome, info in fontes.items():
+        if str(nome).lower() == "waha":
+            continue
         st = info.get("status") if isinstance(info, dict) else str(info)
         tone = "ok" if st == "ok" else ("bad" if st == "erro" else "warn")
         chips.append((f"{nome}: {st}", tone))
@@ -774,7 +725,6 @@ def snapshot_para_pdf(snapshot: dict[str, Any], destino: Path) -> Path | None:
     for nome, bloco, chave in (
         ("Gestao", gestao, None),
         ("Hub", painel, "atualizado_em"),
-        ("WAHA", waha, "atualizado_em"),
         ("Chatwoot", cw, "atualizado_em"),
     ):
         when = bloco.get(chave) if chave and isinstance(bloco, dict) else None
@@ -822,16 +772,17 @@ def relatorio_para_pdf(
     m = metricas_base(snapshot)
     doc = RelatorioPDF()
     rotulo = snapshot.get("rotulo") or "manual"
+    dia_br, gerado_br = _carimbo_cabecalho(snapshot)
     doc.header_band(
         "Relatorio operacional consolidado",
-        f"Gerado {_fmt_quando(snapshot.get('gerado_em'))}  |  fuso America/Sao_Paulo  |  {rotulo}  |  sintese IA",
+        f"HOJE {dia_br}  |  Gerado {gerado_br}  |  fuso America/Sao_Paulo  |  {rotulo}  |  sintese IA",
     )
     doc.kpi_row(
         [
             ("Atrasadas", str(m["n_atr"]), "bad" if m["n_atr"] else "ok"),
             ("Vence hoje", str(m["n_hoje"]), "warn" if m["n_hoje"] else "ok"),
-            ("WAHA OK", str(m["n_working"]), "ok" if m["n_working"] else "warn"),
-            ("WAHA ruins", str(m["n_ruins"]), "bad" if m["n_ruins"] else "ok"),
+            ("Na semana", str(m["n_semana"]), "info"),
+            ("Clientes", str(m.get("n_clientes_ativos") or 0), "info"),
             ("CW elegiveis", str(m["n_el"]), "warn" if m["n_el"] else "ok"),
         ]
     )

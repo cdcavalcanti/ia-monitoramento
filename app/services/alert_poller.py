@@ -250,19 +250,14 @@ async def _tick_painel() -> None:
 
 
 async def _tick() -> None:
-    await _tick_waha()
+    # WAHA removido do monitoramento — só Hub
     await _tick_painel()
 
 
 async def _loop() -> None:
     s = get_settings()
     intervalo = max(20.0, float(s.alert_poll_seconds))
-    logger.info(
-        "alert poller a cada %.0fs | WAHA debounce=%.0fs digest=%.0fmin",
-        intervalo,
-        float(s.waha_alert_debounce_seconds),
-        float(s.waha_alert_digest_minutes),
-    )
+    logger.info("alert poller a cada %.0fs | fonte=Hub (WAHA off)", intervalo)
     while not _stop.is_set():
         try:
             await _tick()
@@ -281,8 +276,8 @@ async def start() -> None:
     if not s.alert_poller_enabled:
         logger.info("ALERT_POLLER_ENABLED=false — poller de alertas off")
         return
-    if not (s.waha_health_enabled or s.painel_enabled):
-        logger.info("nenhuma fonte de alerta ligada (WAHA_HEALTH/PAINEL) — poller off")
+    if not s.painel_enabled:
+        logger.info("PAINEL desligado — poller off (WAHA também removido)")
         return
     _waha_baseline_enviado = False
     _painel_baseline_enviado = False
