@@ -20,11 +20,12 @@ from typing import Any
 import asyncio
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app import auth as ui_auth
 from app.config import get_settings
 from app.services import alert_poller, chatwoot_poller, metrics, ops_cache, scheduler, store
 from app.services.pipeline import gerar_relatorio_diario
@@ -84,6 +85,62 @@ app = FastAPI(title="ia-monitoramento-infinity", lifespan=_lifespan)
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# /health fica público (monitoramento externo); /static só tem shell da UI
+# (HTML/JS/CSS sem dados — os dados vêm das APIs, que exigem sessão).
+_AUTH_PUBLIC_PATHS = {"/health", "/login", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    if not settings.auth_enabled:
+        return await call_next(request)
+    path = request.url.path
+    if path in _AUTH_PUBLIC_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+    if ui_auth.token_valido(request.cookies.get(ui_auth.COOKIE_NAME)):
+        return await call_next(request)
+    if path == "/" and "text/html" in (request.headers.get("accept") or ""):
+        return RedirectResponse("/login", status_code=307)
+    return JSONResponse({"detail": "não autenticado"}, status_code=401)
+
+
+class LoginBody(BaseModel):
+    email: str = ""
+    password: str = ""
+
+
+@app.get("/login")
+async def login_page():
+    if not settings.auth_enabled:
+        return RedirectResponse("/", status_code=307)
+    return HTMLResponse(ui_auth.LOGIN_HTML)
+
+
+@app.post("/login")
+async def login_submit(body: LoginBody):
+    if not settings.auth_enabled:
+        raise HTTPException(404, "auth desligada")
+    if not ui_auth.credenciais_ok(body.email, body.password):
+        raise HTTPException(401, "credenciais inválidas")
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(
+        ui_auth.COOKIE_NAME,
+        ui_auth.make_token(),
+        max_age=int(settings.auth_session_hours * 3600),
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+    return resp
+
+
+@app.post("/logout")
+async def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(ui_auth.COOKIE_NAME, path="/")
+    return resp
+
 
 @app.get("/")
 async def ui_home() -> FileResponse:
@@ -97,6 +154,7 @@ async def ui_home() -> FileResponse:
 async def health() -> dict[str, Any]:
     return {
         "ok": True,
+        "auth": settings.auth_enabled,
         "monitor_enabled": settings.monitor_enabled,
         "modelo": settings.openai_chat_model,
         "infinity_lab": settings.infinity_lab_enabled,

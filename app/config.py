@@ -77,6 +77,19 @@ class Settings(BaseSettings):
     # Limite oficial da API (chunks automáticos em reprocess.py)
     reprocess_max_batch_size: int = 20
 
+    # ---- auth da UI/API (login único via env + cookie HMAC — padrão da casa) ----
+    # Vazio = SEM auth (uso local via SSH port-forward). Preencher os TRÊS antes
+    # de expor com túnel; gerar senha/secret NA VPS (openssl), nunca colar em chat.
+    auth_email: str = ""
+    auth_password: str = ""
+    # HMAC das sessões: openssl rand -hex 32
+    auth_secret: str = ""
+    auth_session_hours: float = 12.0
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.auth_email and self.auth_password and self.auth_secret)
+
     # ---- WAHA (entrega + saúde de sessões) ----
     waha_url: str = ""
     waha_token: str = ""
