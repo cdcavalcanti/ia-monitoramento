@@ -18,12 +18,19 @@ logger = logging.getLogger("monitor.chatwoot_poller")
 
 _task: asyncio.Task | None = None
 _stop = asyncio.Event()
+_tick_lock = asyncio.Lock()
 
 
 async def _loop() -> None:
     s = get_settings()
     intervalo = max(15.0, float(s.chatwoot_poll_seconds))
     logger.info("chatwoot poller ativo a cada %.0fs (silêncio>=%.0fmin)", intervalo, s.chatwoot_silence_minutes)
+    # dá tempo do dash responder no boot antes da 1ª varredura pesada
+    try:
+        await asyncio.wait_for(_stop.wait(), timeout=8.0)
+        return
+    except asyncio.TimeoutError:
+        pass
 
     while not _stop.is_set():
         try:
@@ -39,6 +46,15 @@ async def _loop() -> None:
 
 
 async def _tick() -> None:
+    # evita sobreposição se algum dia o intervalo for menor que a varredura
+    if _tick_lock.locked():
+        logger.warning("poller: tick anterior ainda rodando — pulando")
+        return
+    async with _tick_lock:
+        await _tick_inner()
+
+
+async def _tick_inner() -> None:
     s = get_settings()
     if not s.chatwoot_health_enabled:
         return

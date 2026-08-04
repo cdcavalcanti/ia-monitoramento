@@ -363,6 +363,74 @@ body {
   max-height: none;
   min-height: 46rem;
 }
+.repro-board {
+  grid-column: 1 / -1;
+  max-height: none;
+  min-height: 18rem;
+}
+.repro-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+.repro-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.65rem;
+}
+.repro-stat {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+}
+.repro-stat span {
+  display: block;
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.repro-stat strong {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.repro-lookup {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.45rem;
+  margin-bottom: 0.65rem;
+}
+.repro-lookup input {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 0.55rem 0.7rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+.repro-lookup input:focus {
+  outline: none;
+  border-color: rgba(14, 165, 233, 0.45);
+}
+.repro-list {
+  max-height: 22rem;
+}
+.repro-status {
+  margin-top: 0.55rem;
+  max-height: 12rem;
+  overflow: auto;
+}
+.chip.warn { border-color: rgba(245, 158, 11, 0.35); color: var(--amber); }
+.chip.warn .d { background: var(--amber); }
+.chip.bad { border-color: rgba(239, 68, 68, 0.35); color: var(--red); }
+.chip.bad .d { background: var(--red); }
 .board-h {
   display: flex;
   justify-content: space-between;
@@ -623,11 +691,14 @@ a.card-title:hover { color: var(--blue); }
   .kpis { grid-template-columns: repeat(3, 1fr); }
   .workspace { grid-template-columns: 1fr; }
   .chat-board { grid-column: auto; grid-row: auto; min-height: 28rem; }
+  .repro-stats { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 640px) {
   .kpis { grid-template-columns: 1fr 1fr; }
   .shell { padding: 0.85rem; }
   .chat-form { grid-template-columns: 1fr; }
+  .repro-stats { grid-template-columns: 1fr 1fr; }
+  .repro-lookup { grid-template-columns: 1fr; }
   .topbar { flex-direction: column; align-items: flex-start; }
   .live { width: 100%; }
 }

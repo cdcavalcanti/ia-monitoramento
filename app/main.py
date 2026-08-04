@@ -19,6 +19,7 @@ from typing import Any
 
 import asyncio
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +37,7 @@ logger = logging.getLogger("monitor")
 settings = get_settings()
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _started_at = datetime.now(timezone.utc)
+_auth_probe_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 
 
 @asynccontextmanager
@@ -131,7 +133,6 @@ async def ops_status() -> dict[str, Any]:
             "gestao": settings.gestao_enabled,
             "painel": settings.painel_enabled,
             "chatwoot": settings.chatwoot_health_enabled,
-            "waha": False,
             "lab": settings.infinity_lab_enabled,
             "openai_fallback": bool(settings.openai_api_key),
             "whatsapp": settings.delivery_whatsapp_enabled,
@@ -164,15 +165,123 @@ async def ops_metrics() -> dict[str, Any]:
     return metrics.snapshot()
 
 
+_last_auth_probe: dict[str, Any] | None = None
+_last_auth_probe_ts: float = 0.0
+
+
+@app.get("/ops/reprocess")
+async def ops_reprocess(light: bool = False) -> dict[str, Any]:
+    """Painel do sistema de reprocessamento (estado + fila local + último lote).
+
+    light=1 → só dados locais (rápido para o dash); sem health/auth externos.
+    """
+    import time
+
+    from app.config import get_settings as _gs
+
+    global _last_auth_probe, _last_auth_probe_ts
+
+    s = _gs()
+    snap = metrics.snapshot()
+    endpoint = f"{(s.reprocess_api_base_url or '').rstrip('/')}{s.reprocess_path}"
+    health: dict[str, Any] | None = None
+    auth_probe: dict[str, Any] | None = _last_auth_probe
+    token_ok = bool(s.reprocess_api_token)
+
+    if not light and s.reprocess_api_base_url:
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                resp = await client.get(f"{s.reprocess_api_base_url.rstrip('/')}/health")
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = {"raw": resp.text[:200]}
+                health = {"http_status": resp.status_code, "ok": resp.status_code == 200, "body": body}
+        except Exception as e:
+            health = {"ok": False, "erro": str(e)[:240]}
+
+    agora = time.monotonic()
+    if not light and s.reprocess_ready and token_ok:
+        if _last_auth_probe and (agora - _last_auth_probe_ts) < 120:
+            auth_probe = _last_auth_probe
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    probe = await client.post(
+                        endpoint,
+                        headers={
+                            "Authorization": f"Bearer {s.reprocess_api_token}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        json={
+                            "origem": "ia-monitoramento-infinity",
+                            "motivo": "silencio_ia",
+                            "leads": [],
+                        },
+                    )
+                auth_probe = {
+                    "http_status": probe.status_code,
+                    "ok": probe.status_code in (400, 202, 200) and probe.status_code != 401,
+                    "unauthorized": probe.status_code == 401,
+                }
+                try:
+                    auth_probe["body"] = probe.json()
+                except Exception:
+                    auth_probe["body"] = {"raw": probe.text[:200]}
+                _last_auth_probe = auth_probe
+                _last_auth_probe_ts = agora
+            except Exception as e:
+                auth_probe = {"ok": False, "erro": str(e)[:240]}
+                _last_auth_probe = auth_probe
+                _last_auth_probe_ts = agora
+
+    if not s.reprocess_ready:
+        modo = "desligado"
+    elif not token_ok:
+        modo = "sem_token"
+    elif auth_probe and auth_probe.get("unauthorized"):
+        modo = "token_invalido"
+    elif auth_probe and auth_probe.get("ok") is False and "erro" in (auth_probe or {}):
+        modo = "api_indisponivel"
+    elif s.reprocess_ready and token_ok:
+        modo = "ativo"
+    else:
+        modo = "desligado"
+
+    return {
+        "ok": True,
+        "modo": modo,
+        "config": {
+            "enabled": bool(s.reprocess_enabled),
+            "ready": bool(s.reprocess_ready),
+            "token_configurado": token_ok,
+            "base_url": s.reprocess_api_base_url or None,
+            "path": s.reprocess_path,
+            "endpoint": endpoint,
+            "max_batch": s.reprocess_max_batch_size,
+            "origem": "ia-monitoramento-infinity",
+            "poll_seconds": s.chatwoot_poll_seconds,
+        },
+        "health": health,
+        "auth_probe": auth_probe,
+        "hoje": snap.get("reprocess_hoje") or {},
+        "eventos": snap.get("reprocess_recentes") or [],
+        "enviados": snap.get("reprocess_enviados") or [],
+        "ultimo_lote": snap.get("reprocess_ultimo_lote"),
+        "dia": snap.get("dia"),
+    }
+
+
 @app.get("/ops/live")
 async def ops_live() -> dict[str, Any]:
-    """Snapshots cacheados: Chatwoot (leads), WAHA (ruins), Hub (problemas)."""
+    """Snapshots cacheados: Chatwoot (leads) + Hub (problemas)."""
     return {
         "ok": True,
         "agora": datetime.now(timezone.utc).isoformat(),
         "poll_hint": {
             "ui_seconds": 8,
-            "waha_hub_seconds": settings.alert_poll_seconds,
+            "hub_seconds": settings.alert_poll_seconds,
             "chatwoot_seconds": settings.chatwoot_poll_seconds,
         },
         **ops_cache.get_all(),
@@ -286,6 +395,10 @@ async def chatwoot_leads_silencio() -> dict[str, Any]:
 
 class ReprocessBody(BaseModel):
     enviar: bool = Field(True, description="Se false, só lista elegíveis sem POST no Francisco")
+    force: bool = Field(
+        False,
+        description="Se true, ignora dedup local do dia (ainda respeita idempotência do Francisco)",
+    )
 
 
 @app.post("/chatwoot/reprocessar")
@@ -307,18 +420,32 @@ async def chatwoot_reprocessar(body: ReprocessBody | None = None) -> dict[str, A
         )
     envio = None
     if body.enviar:
-        envio = await enviar_lote(elegiveis)
+        envio = await enviar_lote(elegiveis, force=bool(body.force))
     return {
         "totais": (resultado["dados"] or {}).get("totais"),
         "elegiveis": elegiveis,
         "pausados": (resultado["dados"] or {}).get("leads_pausados_ignorados") or [],
         "reprocessamento": envio,
+        "automatico_habilitado": bool(settings.reprocess_ready),
     }
 
 
 class PerguntarBody(BaseModel):
     pergunta: str
     thread_id: str = "ops-ui"
+
+
+@app.get("/chatwoot/reprocessar/status")
+async def chatwoot_reprocessar_status(
+    queue_id: str | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    """Consulta item na fila do Francisco (queue_id ou request_id)."""
+    from app.services.reprocess import consultar_status
+
+    if not queue_id and not request_id:
+        raise HTTPException(400, "Informe queue_id ou request_id")
+    return await consultar_status(queue_id=queue_id, request_id=request_id)
 
 
 @app.post("/perguntar")

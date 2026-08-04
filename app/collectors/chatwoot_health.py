@@ -339,16 +339,31 @@ def montar_payload_reprocess(
     meta = conv.get("meta") or {}
     sender = meta.get("sender") or {}
     inbox_id = conv.get("inbox_id") or (conv.get("inbox") or {}).get("id")
-    aid = str(account_id) if account_id is not None else None
-    link = link_conversa(base_url or "", aid or "", inbox_id, cid) if aid and base_url else None
+    contact_id = sender.get("id") or conv.get("contact_id")
+
+    def _int(v: Any) -> int | None:
+        try:
+            if v is None or v == "":
+                return None
+            n = int(v)
+            return n if n > 0 else None
+        except Exception:
+            return None
+
+    aid_i = _int(account_id)
+    cid_i = _int(cid)
+    inbox_i = _int(inbox_id)
+    contact_i = _int(contact_id)
+    aid_s = str(aid_i) if aid_i is not None else (str(account_id) if account_id is not None else None)
+    link = link_conversa(base_url or "", aid_s or "", inbox_id, cid) if aid_s and base_url else None
     return {
         "motivo": "silencio_ia",
         "regra": "lead_sem_resposta_ia_gt_threshold",
-        "account_id": aid,
+        "account_id": aid_i,
         "account_nome": account_nome,
-        "conversation_id": cid,
-        "inbox_id": inbox_id,
-        "contact_id": sender.get("id") or conv.get("contact_id"),
+        "conversation_id": cid_i,
+        "inbox_id": inbox_i,
+        "contact_id": contact_i,
         "telefone": telefone,
         "nome": nome,
         "labels": _labels_de(conv),

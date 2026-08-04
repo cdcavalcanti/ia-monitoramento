@@ -66,9 +66,10 @@ def load_disk() -> None:
 
         s = get_settings()
         with _lock:
-            for k in ("chatwoot", "waha", "painel"):
+            for k in ("chatwoot", "painel"):
                 if data.get(k) is not None:
                     _cache[k] = data[k]
+            _cache["waha"] = None
             cw = _cache.get("chatwoot")
             if isinstance(cw, dict) and cw.get("atualizado_em"):
                 if not snapshot_eh_de_hoje(cw.get("atualizado_em"), tz_name=s.report_timezone):
@@ -174,6 +175,12 @@ def _log_hub_servico(item: dict[str, Any]) -> str:
 
 def _log_hub_alerta(texto: str) -> str:
     return f"Alerta do Hub: {texto}"
+
+
+def _eh_ruido_waha(texto: Any) -> bool:
+    """WAHA saiu do monitor — não exibir no dash/cache ao vivo."""
+    t = str(texto or "").lower()
+    return "waha" in t or "números (waha)" in t or "numeros (waha)" in t
 
 
 def _log_conta(c: dict[str, Any]) -> str:
@@ -308,6 +315,8 @@ def set_painel(dados: dict[str, Any], *, status: str = "ok") -> None:
     alertas = []
     for a in alertas_raw:
         texto = a if isinstance(a, str) else json.dumps(a, ensure_ascii=False)
+        if _eh_ruido_waha(texto):
+            continue
         alertas.append({"texto": texto, "log": _log_hub_alerta(texto)})
 
     servicos = []
@@ -315,6 +324,10 @@ def set_painel(dados: dict[str, Any], *, status: str = "ok") -> None:
         if not isinstance(item, dict):
             continue
         if str(item.get("nivel") or "") == "ok":
+            continue
+        nome = item.get("nome") or ""
+        tipo = item.get("tipo") or ""
+        if _eh_ruido_waha(nome) or _eh_ruido_waha(tipo) or str(tipo).lower() in ("waha", "waha_numero"):
             continue
         row = {
             "nome": item.get("nome"),
@@ -328,9 +341,13 @@ def set_painel(dados: dict[str, Any], *, status: str = "ok") -> None:
         for item in norm.get("itens_alerta") or []:
             if not isinstance(item, dict):
                 continue
+            nome = item.get("nome") or item.get("id") or item.get("label") or ""
+            tipo = item.get("tipo") or "alerta"
+            if _eh_ruido_waha(nome) or _eh_ruido_waha(tipo) or str(tipo).lower() in ("waha", "waha_numero"):
+                continue
             row = {
-                "nome": item.get("nome") or item.get("id") or item.get("label"),
-                "tipo": item.get("tipo") or "alerta",
+                "nome": nome,
+                "tipo": tipo,
                 "status": item.get("status") or item.get("estado") or "problema",
                 "nivel": item.get("nivel") or "ruim",
             }
@@ -394,11 +411,33 @@ def set_painel(dados: dict[str, Any], *, status: str = "ok") -> None:
         _persist()
 
 
+def _sanear_painel_view(painel: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(painel, dict):
+        return painel
+    out = dict(painel)
+    out["alertas"] = [
+        a
+        for a in (painel.get("alertas") or [])
+        if not _eh_ruido_waha(
+            a if isinstance(a, str) else (a.get("texto") or a.get("log") if isinstance(a, dict) else a)
+        )
+    ]
+    out["servicos_problema"] = [
+        s
+        for s in (painel.get("servicos_problema") or [])
+        if isinstance(s, dict)
+        and not _eh_ruido_waha(s.get("nome"))
+        and not _eh_ruido_waha(s.get("tipo"))
+        and str(s.get("tipo") or "").lower() not in ("waha", "waha_numero")
+    ]
+    return out
+
+
 def get_all() -> dict[str, Any]:
     with _lock:
         cw = _cache.get("chatwoot")
+        painel = _cache.get("painel")
         return {
             "chatwoot": _sanear_chatwoot_view(cw if isinstance(cw, dict) else None),
-            "waha": _cache.get("waha"),
-            "painel": _cache.get("painel"),
+            "painel": _sanear_painel_view(painel if isinstance(painel, dict) else None),
         }

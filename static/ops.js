@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 let cwTab = "elegiveis";
-let liveCache = { chatwoot: null, waha: null, painel: null };
+let reproTab = "eventos";
+let liveCache = { chatwoot: null, painel: null };
+let reproCache = null;
 const UI_TICK_MS = 8000;
 let tickLeft = UI_TICK_MS / 1000;
 let refreshing = false;
@@ -58,6 +60,7 @@ function card({
     footRight: footRight || "",
     fields: detail?.fields || [],
     raw: detail?.raw || null,
+    queueId: detail?.queueId || null,
   });
   return `<article class="card ${tone}" data-card-id="${id}" role="button" tabindex="0">
     <div class="card-top"><span class="tag ${tone}">${esc(tag)}</span></div>
@@ -101,16 +104,36 @@ function openDrawer(id) {
     : "";
 
   $("drawerBody").innerHTML = `${logBlock}${kv ? `<div class="detail-grid">${kv}</div>` : ""}${rawBlock}`;
-  $("drawerFooter").innerHTML = d.href
-    ? `<a class="btn primary" href="${esc(d.href)}" target="_blank" rel="noopener">Abrir no Chatwoot</a>
-       <button type="button" class="btn ghost" id="drawerClose2">Fechar</button>`
-    : `<button type="button" class="btn ghost" id="drawerClose2">Fechar</button>`;
+
+  const actions = [];
+  if (d.queueId) {
+    actions.push(
+      `<button type="button" class="btn primary" id="drawerQueueBtn">Consultar fila Francisco</button>`
+    );
+  }
+  if (d.href) {
+    actions.push(
+      `<a class="btn primary" href="${esc(d.href)}" target="_blank" rel="noopener">Abrir no Chatwoot</a>`
+    );
+  }
+  actions.push(`<button type="button" class="btn ghost" id="drawerClose2">Fechar</button>`);
+  $("drawerFooter").innerHTML = actions.join("");
 
   drawer.hidden = false;
   backdrop.hidden = false;
   drawer.classList.add("is-open");
   drawer.setAttribute("aria-hidden", "false");
   $("drawerClose2")?.addEventListener("click", closeDrawer, { once: true });
+  $("drawerQueueBtn")?.addEventListener(
+    "click",
+    () => {
+      closeDrawer();
+      if ($("reproQueueInput")) $("reproQueueInput").value = d.queueId;
+      consultarQueueStatus(d.queueId);
+      $("panelRepro")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    },
+    { once: true }
+  );
 }
 
 function closeDrawer() {
@@ -169,11 +192,22 @@ function renderFontes(fontes) {
     .join("");
 }
 
-async function fetchJson(url, opts) {
-  const res = await fetch(url, opts);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || data.message || res.statusText || "erro");
-  return data;
+async function fetchJson(url, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 12000;
+  const { timeoutMs: _drop, ...rest } = opts;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...rest, signal: ctrl.signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.message || data.mensagem || res.statusText || "erro");
+    return data;
+  } catch (err) {
+    if (err?.name === "AbortError") throw new Error(`timeout ${timeoutMs}ms em ${url}`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function renderChatwoot() {
@@ -293,8 +327,9 @@ function renderChatwoot() {
   }
 }
 
-function renderWaha() {
-  /* WAHA removido do monitor */
+function isWahaNoise(text) {
+  const t = String(text || "").toLowerCase();
+  return t.includes("waha") || t.includes("números (waha)") || t.includes("numeros (waha)");
 }
 
 function renderHub() {
@@ -313,13 +348,22 @@ function renderHub() {
     $("mHubSub").textContent = `atualizado ${ago(h.atualizado_em)}`;
   }
   $("hubMeta").textContent = `Atualizado ${ago(h.atualizado_em)}`;
+
+  const servicos = (h.servicos_problema || []).filter(
+    (s) => !isWahaNoise(s.nome) && !isWahaNoise(s.tipo) && !isWahaNoise(s.log)
+  );
+  const alertas = (h.alertas || []).filter((a) => {
+    const texto = typeof a === "string" ? a : a.texto || a.log || JSON.stringify(a);
+    return !isWahaNoise(texto);
+  });
+
   $("hubStats").innerHTML = `
     <span class="pill ${cls}">saúde ${esc(saude)}</span>
-    <span class="pill bad">serviços ${fmtNum((h.servicos_problema || []).length)}</span>
-    <span class="pill warn">alertas ${fmtNum((h.alertas || []).length)}</span>`;
+    <span class="pill bad">serviços ${fmtNum(servicos.length)}</span>
+    <span class="pill warn">alertas ${fmtNum(alertas.length)}</span>`;
 
   const parts = [];
-  for (const s of h.servicos_problema || []) {
+  for (const s of servicos) {
     parts.push(
       card({
         tone: "bad",
@@ -345,7 +389,7 @@ function renderHub() {
       })
     );
   }
-  for (const a of h.alertas || []) {
+  for (const a of alertas) {
     const texto = typeof a === "string" ? a : a.texto || JSON.stringify(a);
     const log = typeof a === "object" && a.log ? a.log : `Alerta do Hub: ${texto}`;
     parts.push(
@@ -398,9 +442,218 @@ function renderHub() {
 function renderAllLive() {
   cardStore.clear();
   renderChatwoot();
-  renderWaha();
   renderHub();
+  renderReprocess();
 }
+
+function reproTone(status) {
+  const s = String(status || "").toLowerCase();
+  if (["ok", "success", "enviado", "enfileirado", "ativo"].includes(s)) return "ok";
+  if (["stub", "dedup", "pending", "running", "sem_token", "desligado"].includes(s)) return "warn";
+  if (["erro", "error", "canceled", "ignorado"].includes(s)) return s === "ignorado" ? "violet" : "bad";
+  return "";
+}
+
+function renderReprocess() {
+  const panel = $("panelRepro");
+  if (!panel) return;
+  const data = reproCache;
+  if (!data) {
+    $("reproMeta").textContent = "Carregando…";
+    $("reproList").innerHTML = `<div class="empty">Aguardando dados do reprocessamento.</div>`;
+    return;
+  }
+
+  const cfg = data.config || {};
+  const hoje = data.hoje || {};
+  const health = data.health || {};
+  const modo = data.modo || "desligado";
+  const modoLabel =
+    modo === "ativo"
+      ? "AUTO ativo"
+      : modo === "sem_token"
+        ? "Sem token"
+        : modo === "token_invalido"
+          ? "Token inválido"
+          : modo === "api_indisponivel"
+            ? "API fora"
+            : "Desligado (stub)";
+  const chip = $("reproModeChip");
+  chip.className = `chip ${
+    modo === "ativo" ? "on" : modo === "sem_token" || modo === "token_invalido" || modo === "api_indisponivel" ? "warn" : "bad"
+  }`;
+  $("reproModeLabel").textContent = modoLabel;
+
+  const healthTxt = health.ok ? "API ok" : health.erro ? `API: ${health.erro}` : `API HTTP ${health.http_status || "—"}`;
+  const auth = data.auth_probe || {};
+  const authTxt = auth.unauthorized
+    ? "auth 401 (token rejeitado)"
+    : auth.ok
+      ? "auth ok"
+      : auth.erro
+        ? `auth: ${auth.erro}`
+        : auth.http_status
+          ? `auth HTTP ${auth.http_status}`
+          : "auth —";
+  $("reproMeta").textContent =
+    `${cfg.endpoint || "—"} · lote ≤${cfg.max_batch || 20} · poll ${cfg.poll_seconds || "—"}s · ${healthTxt} · ${authTxt}`;
+
+  const elegAgora = liveCache.chatwoot?.totais?.elegiveis ?? "—";
+  $("reproStats").innerHTML = [
+    ["Capturados", hoje.capturados],
+    ["Enviados", hoje.enviados],
+    ["Stub", hoje.stub],
+    ["Erros", hoje.erros],
+    ["Elegíveis agora", elegAgora],
+  ]
+    .map(
+      ([label, val]) =>
+        `<div class="repro-stat"><span>${esc(label)}</span><strong>${esc(fmtNum(val))}</strong></div>`
+    )
+    .join("");
+
+  if (reproTab === "eventos") {
+    const list = data.eventos || [];
+    $("reproList").innerHTML = list.length
+      ? list
+          .map((ev) =>
+            card({
+              tone: reproTone(ev.status || ev.kind),
+              tag: ev.kind || "evento",
+              title: `${ev.status || "—"} · ${ev.count ?? 0} lead(s)`,
+              sub: ev.detail || "",
+              footLeft: ago(ev.ts),
+              footRight: ev.ts ? String(ev.ts).slice(11, 19) : "",
+              detail: {
+                source: "Reprocess · evento",
+                fields: [
+                  { label: "Kind", value: ev.kind },
+                  { label: "Status", value: ev.status },
+                  { label: "Count", value: ev.count },
+                  { label: "Quando", value: ev.ts },
+                  { label: "Detalhe", value: ev.detail },
+                ],
+                raw: ev,
+              },
+            })
+          )
+          .join("")
+      : `<div class="empty">Nenhum evento ainda. Use “Reprocessar agora” ou aguarde o poller.</div>`;
+  } else if (reproTab === "enviados") {
+    const list = data.enviados || [];
+    $("reproList").innerHTML = list.length
+      ? list
+          .map((item) =>
+            card({
+              tone: reproTone(item.status),
+              tag: item.status || "enviado",
+              title: `conv ${item.conversation_id || "—"} · conta ${item.account_id || "—"}`,
+              sub: item.queue_id ? `queue ${item.queue_id}` : item.detail || "sem queue_id",
+              log: item.detail || "",
+              footLeft: ago(item.ts),
+              footRight: item.queue_id ? "consultar" : "—",
+              detail: {
+                source: "Reprocess · enfileirado",
+                fields: [
+                  { label: "Account", value: item.account_id },
+                  { label: "Conversa", value: item.conversation_id },
+                  { label: "Queue ID", value: item.queue_id },
+                  { label: "Status local", value: item.status },
+                  { label: "Key", value: item.key },
+                  { label: "Quando", value: item.ts },
+                ],
+                raw: item,
+                queueId: item.queue_id || null,
+              },
+            })
+          )
+          .join("")
+      : `<div class="empty">Nada enfileirado ainda hoje.</div>`;
+  } else {
+    const lote = data.ultimo_lote;
+    if (!lote) {
+      $("reproList").innerHTML = `<div class="empty">Nenhum lote enviado ainda.</div>`;
+    } else {
+      const resultados = lote.resultados || [];
+      const head = card({
+        tone: reproTone(lote.status),
+        tag: "lote",
+        title: `status ${lote.status || "—"} · HTTP ${lote.http_status ?? "—"}`,
+        sub: `aceitos ${lote.aceitos ?? 0} · ignorados ${lote.ignorados ?? 0} · erros ${lote.erros ?? 0} · lotes ${lote.lotes ?? 1}`,
+        footLeft: ago(lote.ts),
+        footRight: lote.endpoint || "",
+        detail: {
+          source: "Reprocess · último lote",
+          fields: [
+            { label: "Status", value: lote.status },
+            { label: "HTTP", value: lote.http_status },
+            { label: "Endpoint", value: lote.endpoint },
+            { label: "Detalhe", value: lote.detalhe },
+            { label: "Queue IDs", value: (lote.queue_ids || []).join(", ") },
+          ],
+          raw: lote,
+        },
+      });
+      const items = resultados.length
+        ? resultados
+            .map((r) =>
+              card({
+                tone: reproTone(r.status),
+                tag: r.status || "item",
+                title: `conv ${r.conversation_id ?? "—"}`,
+                sub: r.queue_id
+                  ? `queue ${r.queue_id}`
+                  : r.mensagem || r.motivo || "",
+                log: r.motivo || r.mensagem || "",
+                footLeft: r.idempotency_key ? String(r.idempotency_key).slice(0, 18) + "…" : "",
+                footRight: r.motivo || r.status || "",
+                detail: {
+                  source: "Reprocess · item do lote",
+                  fields: [
+                    { label: "Conversa", value: r.conversation_id },
+                    { label: "Status", value: r.status },
+                    { label: "Motivo", value: r.motivo },
+                    { label: "Mensagem", value: r.mensagem },
+                    { label: "Queue ID", value: r.queue_id },
+                    { label: "Idempotency", value: r.idempotency_key },
+                  ],
+                  raw: r,
+                  queueId: r.queue_id || null,
+                },
+              })
+            )
+            .join("")
+        : `<div class="empty">Lote sem array resultados (stub/dedup/erro cedo).</div>`;
+      $("reproList").innerHTML = head + items;
+    }
+  }
+}
+
+async function loadReprocess() {
+  try {
+    reproCache = await fetchJson("/ops/reprocess?light=1", { timeoutMs: 8000 });
+    renderReprocess();
+  } catch (err) {
+    if ($("reproMeta")) $("reproMeta").textContent = `Falha ao carregar: ${err.message}`;
+  }
+}
+
+async function consultarQueueStatus(id) {
+  const raw = String(id || "").trim();
+  if (!raw) return;
+  const log = $("reproStatusLog");
+  log.hidden = false;
+  log.textContent = `Consultando ${raw}…`;
+  try {
+    const looksUuid = /^[0-9a-f]{8}-/i.test(raw);
+    const q = looksUuid ? `request_id=${encodeURIComponent(raw)}` : `queue_id=${encodeURIComponent(raw)}`;
+    const data = await fetchJson(`/chatwoot/reprocessar/status?${q}`, { timeoutMs: 20000 });
+    log.textContent = JSON.stringify(data, null, 2);
+  } catch (err) {
+    log.textContent = `Erro: ${err.message}`;
+  }
+}
+
 
 async function refresh({ forceLight = true } = {}) {
   if (refreshing) return;
@@ -410,27 +663,26 @@ async function refresh({ forceLight = true } = {}) {
   if (clock) clock.classList.add("busy");
   if (clockText) clockText.textContent = "atualizando…";
   try {
+    // refresh-live pode demorar — não bloqueia o restante da UI
     if (forceLight) {
-      try {
-        const light = await fetchJson("/ops/refresh-live", { method: "POST" });
-        liveCache = {
-          chatwoot: light.chatwoot ?? liveCache.chatwoot,
-          waha: light.waha ?? liveCache.waha,
-          painel: light.painel ?? liveCache.painel,
-        };
-      } catch (_) {
-        /* cache antigo ainda serve */
-      }
+      fetchJson("/ops/refresh-live", { method: "POST", timeoutMs: 6000 })
+        .then((light) => {
+          liveCache = {
+            chatwoot: light.chatwoot ?? liveCache.chatwoot,
+            painel: light.painel ?? liveCache.painel,
+          };
+          renderAllLive();
+        })
+        .catch(() => {});
     }
 
     const [status, metrics, live] = await Promise.all([
-      fetchJson("/ops/status"),
-      fetchJson("/ops/metrics"),
-      fetchJson("/ops/live"),
+      fetchJson("/ops/status", { timeoutMs: 8000 }),
+      fetchJson("/ops/metrics", { timeoutMs: 8000 }),
+      fetchJson("/ops/live", { timeoutMs: 8000 }),
     ]);
     liveCache = {
       chatwoot: live.chatwoot ?? liveCache.chatwoot,
-      waha: live.waha ?? liveCache.waha,
       painel: live.painel ?? liveCache.painel,
     };
 
@@ -461,7 +713,20 @@ async function refresh({ forceLight = true } = {}) {
     $("mSentSub").textContent = `stub ${fmtNum(repro.stub)} · err ${fmtNum(repro.erros)}`;
     $("diaLabel").textContent = metrics.dia || "—";
 
+    if (!reproCache) {
+      reproCache = {
+        modo: status.fontes?.reprocess_auto ? "ativo" : "desligado",
+        config: {},
+        hoje: repro,
+        eventos: metrics.reprocess_recentes || [],
+        enviados: metrics.reprocess_enviados || [],
+        ultimo_lote: metrics.reprocess_ultimo_lote || null,
+        health: null,
+      };
+    }
+
     renderAllLive();
+    loadReprocess();
   } catch (err) {
     setLive(false, "Offline", err.message || "falha");
     if (clockText) clockText.textContent = "offline";
@@ -494,7 +759,15 @@ $("cwTabs").addEventListener("click", (e) => {
   renderAllLive();
 });
 
-["cwList", "hubList"].forEach((id) => {
+$("reproTabs")?.addEventListener("click", (e) => {
+  const btn = e.target.closest(".seg-btn");
+  if (!btn) return;
+  reproTab = btn.dataset.tab;
+  [...$("reproTabs").querySelectorAll(".seg-btn")].forEach((t) => t.classList.toggle("on", t === btn));
+  renderReprocess();
+});
+
+["cwList", "hubList", "reproList"].forEach((id) => {
   const el = $(id);
   if (!el) return;
   el.addEventListener("click", onCardActivate);
@@ -507,6 +780,43 @@ document.addEventListener("keydown", (e) => {
 });
 
 $("btnRefresh").addEventListener("click", () => refresh({ forceLight: true }));
+$("btnReproRefresh")?.addEventListener("click", () => loadReprocess());
+
+$("reproLookupForm")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  consultarQueueStatus($("reproQueueInput").value);
+});
+
+$("btnReproForce")?.addEventListener("click", async () => {
+  const btn = $("btnReproForce");
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "Forçando…";
+  try {
+    const data = await fetchJson("/chatwoot/reprocessar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enviar: true, force: true }),
+      timeoutMs: 300000,
+    });
+    const r = data.reprocessamento || {};
+    showLog(
+      `Força ${r.status || "—"} · aceitos=${r.aceitos ?? "—"} · ` +
+        `ignorados=${r.ignorados ?? "—"} · queue_ids=${(r.queue_ids || []).length}`
+    );
+    reproTab = "lote";
+    [...$("reproTabs").querySelectorAll(".seg-btn")].forEach((t) =>
+      t.classList.toggle("on", t.dataset.tab === "lote")
+    );
+    await loadReprocess();
+    await refresh();
+  } catch (err) {
+    showLog(`Erro força: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+});
 
 $("btnRelatorio").addEventListener("click", async () => {
   const btn = $("btnRelatorio");
@@ -537,6 +847,48 @@ $("btnSilencio").addEventListener("click", async () => {
     showLog(`Varredura ${data.status} · elegíveis=${data.dados?.totais?.elegiveis ?? 0}`);
   } catch (err) {
     showLog(`Erro: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+});
+
+$("btnReprocess").addEventListener("click", async () => {
+  const btn = $("btnReprocess");
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "Enviando…";
+  showLog("Reprocessando: varrendo Chatwoot e enviando ao Francisco… (pode levar 1–2 min)");
+  try {
+    const data = await fetchJson("/chatwoot/reprocessar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enviar: true, force: false }),
+      timeoutMs: 300000,
+    });
+    await refresh();
+    const r = data.reprocessamento || {};
+    const auto = data.automatico_habilitado ? "AUTO on" : "AUTO off (stub)";
+    const resumoItens = (r.resultados || [])
+      .slice(0, 5)
+      .map((x) => `${x.conversation_id}:${x.status}${x.motivo ? "(" + x.motivo + ")" : ""}`)
+      .join(", ");
+    showLog(
+      `Reprocess ${r.status || "—"} · ${auto} · ` +
+        `elegíveis=${(data.elegiveis || []).length} · ` +
+        `enviados=${r.enviados ?? 0} · aceitos=${r.aceitos ?? "—"} · ` +
+        `ignorados=${r.ignorados ?? "—"} · erros=${r.erros ?? "—"} · ` +
+        `http=${r.http_status ?? "—"} · ` +
+        `detalhe=${r.detalhe || "—"}` +
+        (resumoItens ? ` · itens=[${resumoItens}]` : "")
+    );
+    reproTab = "lote";
+    [...($("reproTabs")?.querySelectorAll(".seg-btn") || [])].forEach((t) =>
+      t.classList.toggle("on", t.dataset.tab === "lote")
+    );
+    await loadReprocess();
+  } catch (err) {
+    showLog(`Erro reprocess: ${err.message}`);
   } finally {
     btn.disabled = false;
     btn.textContent = old;

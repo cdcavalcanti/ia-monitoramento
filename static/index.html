@@ -33,6 +33,7 @@
         </div>
         <button type="button" class="btn ghost" id="btnRefresh">Atualizar</button>
         <button type="button" class="btn ghost" id="btnSilencio">Varrer Chatwoot</button>
+        <button type="button" class="btn ghost" id="btnReprocess">Reprocessar agora</button>
         <button type="button" class="btn primary" id="btnRelatorio">Gerar relatório</button>
       </div>
     </header>
@@ -88,6 +89,32 @@
           <button type="submit" class="btn primary" id="chatSend">Enviar</button>
         </form>
         <pre class="log" id="actionLog" hidden></pre>
+      </section>
+
+      <section class="board repro-board" id="panelRepro">
+        <header class="board-h">
+          <div>
+            <h2>Reprocessamento</h2>
+            <p class="board-sub" id="reproMeta">Fila Francisco · monitoramento → n8n</p>
+          </div>
+          <div class="repro-actions">
+            <span class="chip" id="reproModeChip"><i class="d"></i><span id="reproModeLabel">…</span></span>
+            <div class="seg" id="reproTabs">
+              <button type="button" class="seg-btn on" data-tab="eventos">Eventos</button>
+              <button type="button" class="seg-btn" data-tab="enviados">Enfileirados</button>
+              <button type="button" class="seg-btn" data-tab="lote">Último lote</button>
+            </div>
+            <button type="button" class="btn ghost" id="btnReproRefresh">Atualizar</button>
+            <button type="button" class="btn ghost" id="btnReproForce">Forçar envio</button>
+          </div>
+        </header>
+        <div class="repro-stats" id="reproStats"></div>
+        <form class="repro-lookup" id="reproLookupForm">
+          <input type="text" id="reproQueueInput" placeholder="queue_id ou request_id" autocomplete="off" />
+          <button type="submit" class="btn ghost">Consultar status</button>
+        </form>
+        <div class="card-list repro-list" id="reproList"></div>
+        <pre class="log repro-status" id="reproStatusLog" hidden></pre>
       </section>
     </main>
 

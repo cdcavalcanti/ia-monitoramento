@@ -67,13 +67,15 @@ class Settings(BaseSettings):
         "handoff,agendado,consulta_agendada"
     )
 
-    # ---- Sistema de reprocessamento (Francisco) ----
-    # Endpoints definitivos chegam com o mapeamento dele. Até lá: stub seguro.
-    reprocess_api_base_url: str = ""
+    # ---- Sistema de reprocessamento (Francisco / chat-reprocessor) ----
+    # Produção: https://chat-reprocessor.vercel.app
+    reprocess_api_base_url: str = "https://chat-reprocessor.vercel.app"
     reprocess_api_token: str = ""
     reprocess_enabled: bool = False
-    # Path relativo ao base_url. Ajustar quando o map chegar.
-    reprocess_path: str = "/api/reprocessar"
+    # Endpoint de lote automático (IA monitoramento → fila Francisco)
+    reprocess_path: str = "/api/reprocess/automatic"
+    # Limite oficial da API (chunks automáticos em reprocess.py)
+    reprocess_max_batch_size: int = 20
 
     # ---- WAHA (entrega + saúde de sessões) ----
     waha_url: str = ""

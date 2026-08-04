@@ -105,12 +105,10 @@ Local sem Docker:
 | `PAINEL_*` / `CHATWOOT_HEALTH_ENABLED` | fase 2 |
 | `NOTIFY_WHATSAPP_TO` + `WAHA_*` | entrega do resumo |
 
-## Fase 2 (quando as APIs chegarem)
+## Reprocessamento (Chatwoot → Francisco)
 
-1. Preencher `app/collectors/painel.py` com os endpoints reais e header correto
-2. Expandir `app/collectors/chatwoot_health.py` com regras de erro/pausa/reprocessamento
-3. Atualizar `app/agent/conhecimento.py` (fatos) — o prompt já reserva as seções 3 e 4
-4. Ligar `PAINEL_ENABLED=true` e/ou `CHATWOOT_HEALTH_ENABLED=true`
+Detecção de silêncio neste monitor → `POST` em `https://chat-reprocessor.vercel.app/api/reprocess/automatic`.
 
-**Fora de escopo desta IA:** automatizar reprocessamento de leads no Chatwoot.
-O relatório só alerta; a ação fica em serviço separado.
+No `.env`: `REPROCESS_API_TOKEN` (mesmo do chat-reprocessor) + `REPROCESS_ENABLED=true`.
+
+Dash: botão **Reprocessar agora**. Doc: `docs/chatwoot-reprocess.md`.

@@ -99,6 +99,32 @@ def init() -> None:
                 );
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reprocess_sent (
+                    key TEXT PRIMARY KEY,
+                    ts TEXT NOT NULL,
+                    status TEXT,
+                    detail TEXT
+                )
+                """
+            )
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(reprocess_sent)").fetchall()}
+            if "queue_id" not in cols:
+                conn.execute("ALTER TABLE reprocess_sent ADD COLUMN queue_id TEXT")
+            if "conversation_id" not in cols:
+                conn.execute("ALTER TABLE reprocess_sent ADD COLUMN conversation_id TEXT")
+            if "account_id" not in cols:
+                conn.execute("ALTER TABLE reprocess_sent ADD COLUMN account_id TEXT")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reprocess_lotes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                )
+                """
+            )
         _initialized = True
 
 
@@ -215,6 +241,100 @@ def record_reprocess(*, kind: str, count: int, status: str, detail: str | None =
             )
 
 
+def ja_enviado_reprocess(key: str) -> bool:
+    """True se já enfileiramos este lead hoje (dedup local)."""
+    _ensure()
+    with _lock:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM reprocess_sent WHERE key = ? LIMIT 1",
+                (key,),
+            ).fetchone()
+            return bool(row)
+
+
+def marcar_enviado_reprocess(
+    key: str,
+    *,
+    status: str = "enfileirado",
+    detail: str | None = None,
+    queue_id: str | None = None,
+) -> None:
+    _ensure()
+    parts = str(key).split(":")
+    account_id = parts[0] if len(parts) >= 1 else None
+    conversation_id = parts[1] if len(parts) >= 2 else None
+    with _lock:
+        with _conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO reprocess_sent
+                    (key, ts, status, detail, queue_id, conversation_id, account_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    ts = excluded.ts,
+                    status = excluded.status,
+                    detail = excluded.detail,
+                    queue_id = COALESCE(excluded.queue_id, reprocess_sent.queue_id),
+                    conversation_id = COALESCE(excluded.conversation_id, reprocess_sent.conversation_id),
+                    account_id = COALESCE(excluded.account_id, reprocess_sent.account_id)
+                """,
+                (key, _now_iso(), status, detail, queue_id, conversation_id, account_id),
+            )
+
+
+def salvar_lote_reprocess(payload: dict[str, Any]) -> None:
+    """Guarda o último lote enviado (para o painel do dash)."""
+    _ensure()
+    with _lock:
+        with _conn() as conn:
+            conn.execute(
+                "INSERT INTO reprocess_lotes (ts, payload) VALUES (?, ?)",
+                (_now_iso(), json.dumps(payload, ensure_ascii=False, default=str)),
+            )
+            # mantém só os 20 mais recentes
+            conn.execute(
+                """
+                DELETE FROM reprocess_lotes
+                WHERE id NOT IN (
+                    SELECT id FROM reprocess_lotes ORDER BY id DESC LIMIT 20
+                )
+                """
+            )
+
+
+def listar_enviados_reprocess(*, limit: int = 40) -> list[dict[str, Any]]:
+    _ensure()
+    with _lock:
+        with _conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT key, ts, status, detail, queue_id, conversation_id, account_id
+                FROM reprocess_sent
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 100)),),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+
+def ultimo_lote_reprocess() -> dict[str, Any] | None:
+    _ensure()
+    with _lock:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT id, ts, payload FROM reprocess_lotes ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                body = json.loads(row["payload"])
+            except Exception:
+                body = {"raw": row["payload"]}
+            return {"id": row["id"], "ts": row["ts"], **(body if isinstance(body, dict) else {"payload": body})}
+
+
 def heartbeat(source: str, status: str, detail: dict | str | None = None) -> None:
     _ensure()
     detail_s = (
@@ -290,10 +410,26 @@ def snapshot() -> dict[str, Any]:
                     """
                     SELECT ts, kind, count, status, detail
                     FROM reprocess_events
-                    ORDER BY id DESC LIMIT 12
+                    ORDER BY id DESC LIMIT 24
                     """
                 ).fetchall()
             ]
+
+            enviados_recentes = [
+                dict(r)
+                for r in conn.execute(
+                    """
+                    SELECT key, ts, status, detail, queue_id, conversation_id, account_id
+                    FROM reprocess_sent
+                    ORDER BY ts DESC
+                    LIMIT 40
+                    """
+                ).fetchall()
+            ]
+
+            ultimo_lote_row = conn.execute(
+                "SELECT id, ts, payload FROM reprocess_lotes ORDER BY id DESC LIMIT 1"
+            ).fetchone()
 
             beats = [
                 dict(r)
@@ -301,6 +437,18 @@ def snapshot() -> dict[str, Any]:
                     "SELECT source, ts, status, detail FROM heartbeats ORDER BY source"
                 ).fetchall()
             ]
+
+    ultimo_lote: dict[str, Any] | None = None
+    if ultimo_lote_row:
+        try:
+            body = json.loads(ultimo_lote_row["payload"])
+        except Exception:
+            body = {"raw": ultimo_lote_row["payload"]}
+        ultimo_lote = {
+            "id": ultimo_lote_row["id"],
+            "ts": ultimo_lote_row["ts"],
+            **(body if isinstance(body, dict) else {"payload": body}),
+        }
 
     tz = _tz()
     return {
@@ -323,5 +471,7 @@ def snapshot() -> dict[str, Any]:
             "erros": int(repro["erros"] or 0),
         },
         "reprocess_recentes": recent_repro,
+        "reprocess_enviados": enviados_recentes,
+        "reprocess_ultimo_lote": ultimo_lote,
         "heartbeats": beats,
     }

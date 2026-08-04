@@ -202,7 +202,7 @@ async def gerar_relatorio_diario(
         "nota": (
             "Reprocess AUTO ligado — lote enviado ao Francisco."
             if s.reprocess_ready
-            else "Reprocess AUTO desligado (REPROCESS_ENABLED=false). Detecção ativa; envio só quando Francisco plugar."
+            else "Reprocess AUTO desligado. Detecção ativa; defina REPROCESS_API_TOKEN + REPROCESS_ENABLED=true."
         ),
     }
 
