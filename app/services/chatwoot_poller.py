@@ -87,12 +87,9 @@ async def _tick_inner() -> None:
         },
     )
     if elegiveis:
-        metrics.record_reprocess(
-            kind="captured",
-            count=len(elegiveis),
-            status="detected",
-            detail=f"somente_hoje={dados.get('somente_hoje')}",
-        )
+        novos = metrics.registrar_capturas_unicas(elegiveis)
+        if novos:
+            logger.info("poller: %s elegível(is) novo(s) hoje", novos)
 
     if elegiveis:
         envio = await enviar_lote(elegiveis)

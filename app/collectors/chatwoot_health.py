@@ -148,6 +148,27 @@ class ChatwootHealthClient:
             f"/api/v1/accounts/{self.account_id}/conversations/{conversation_id}/messages"
         )
 
+    async def listar_labels(self, conversation_id: int | str) -> list[str]:
+        """Labels reais da conversa (lista da conversa às vezes vem vazia)."""
+        try:
+            data = await self._get(
+                f"/api/v1/accounts/{self.account_id}/conversations/{conversation_id}/labels"
+            )
+        except Exception:
+            return []
+        raw = data.get("payload") if isinstance(data, dict) else data
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                t = str(item.get("title") or item.get("name") or item.get("slug") or "").strip()
+                if t:
+                    out.append(t)
+        return out
+
 
 def _agora() -> datetime:
     return datetime.now(timezone.utc)
@@ -183,9 +204,15 @@ def _labels_de(conv: dict[str, Any]) -> list[str]:
 
 
 def _tem_pausa(labels: list[str], pause_labels: set[str]) -> bool:
-    normalizados = {l.lower().replace(" ", "_").replace("-", "_") for l in labels}
-    alvos = {p.lower().replace(" ", "_").replace("-", "_") for p in pause_labels}
-    return bool(normalizados & alvos)
+    normalizados = {_normalizar_label(l) for l in labels}
+    alvos = {_normalizar_label(p) for p in pause_labels}
+    if normalizados & alvos:
+        return True
+    # fallback por substring (ex.: "pausar_ia_cliente")
+    for lab in normalizados:
+        if "pausar" in lab or lab.startswith("pause_ia") or "ia_pausada" in lab:
+            return True
+    return False
 
 
 def _normalizar_label(lab: str) -> str:
@@ -193,11 +220,27 @@ def _normalizar_label(lab: str) -> str:
 
 
 def _tem_skip(labels: list[str], skip_labels: set[str]) -> bool:
-    if not skip_labels:
+    if not skip_labels and not labels:
         return False
     normalizados = {_normalizar_label(l) for l in labels}
     alvos = {_normalizar_label(p) for p in skip_labels}
-    return bool(normalizados & alvos)
+    if normalizados & alvos:
+        return True
+    # transferência / agendamento mesmo com nome parcial na etiqueta
+    for lab in normalizados:
+        if any(
+            tok in lab
+            for tok in (
+                "transfer",
+                "agendad",
+                "handoff",
+                "atendimento_humano",
+                "lead_agendado",
+                "consulta_agendada",
+            )
+        ):
+            return True
+    return False
 
 
 def _eh_activity(m: dict[str, Any]) -> bool:
@@ -535,6 +578,24 @@ async def _varrer_conta(
                             only_today=only_today,
                             timezone_name=timezone_name,
                         )
+                        # Se passou no filtro de silêncio/hoje, confirma etiquetas na API
+                        # (pausar_ia / transferência às vezes não vêm no list).
+                        if item:
+                            labs = await client.listar_labels(cid)
+                            if labs:
+                                conv_l = {**conv, "labels": labs}
+                                item = analisar_conversa(
+                                    conv_l,
+                                    msgs,
+                                    silencio_minutos=silencio,
+                                    pause_labels=pause_labels,
+                                    skip_labels=skip_labels,
+                                    account_id=client.account_id,
+                                    account_nome=account_nome,
+                                    base_url=base_url,
+                                    only_today=only_today,
+                                    timezone_name=timezone_name,
+                                )
                     except Exception:
                         erros_msg += 1
                         logger.warning(

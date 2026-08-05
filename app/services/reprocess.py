@@ -182,15 +182,10 @@ async def enviar_lote(
     endpoint = f"{(s.reprocess_api_base_url or '').rstrip('/')}{s.reprocess_path}"
 
     if not s.reprocess_ready:
+        # NÃO somar len(elegiveis) a cada tick — inflava stub/capturados (ex.: 904).
         logger.info(
             "reprocess stub: %d lead(s) prontos, mas REPROCESS_ENABLED/URL off",
             len(elegiveis),
-        )
-        metrics.record_reprocess(
-            kind="stub",
-            count=len(elegiveis),
-            status="stub",
-            detail="REPROCESS_ENABLED=false ou URL vazia",
         )
         return {
             "enviados": 0,
@@ -203,12 +198,8 @@ async def enviar_lote(
         }
 
     if not s.reprocess_api_token:
-        metrics.record_reprocess(
-            kind="erro",
-            count=len(elegiveis),
-            status="sem_token",
-            detail="REPROCESS_API_TOKEN vazio",
-        )
+        # Mesmo cuidado: não re-contar a cada varredura.
+        logger.warning("reprocess: REPROCESS_API_TOKEN vazio (%d elegíveis)", len(elegiveis))
         return {
             "enviados": 0,
             "pulados": len(elegiveis),
@@ -236,11 +227,10 @@ async def enviar_lote(
                 novos.append(lead)
 
     if not novos:
-        metrics.record_reprocess(
-            kind="stub",
-            count=len(pulados_dedup),
-            status="dedup",
-            detail="todos já enfileirados hoje (dedup local)",
+        # Dedup silencioso: não gravar evento com count=N a cada minuto (inflava stub).
+        logger.debug(
+            "reprocess dedup: %d já enfileirado(s) hoje — nada novo",
+            len(pulados_dedup),
         )
         return {
             "enviados": 0,

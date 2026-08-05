@@ -125,6 +125,19 @@ def init() -> None:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reprocess_captured (
+                    key TEXT PRIMARY KEY,
+                    ts TEXT NOT NULL,
+                    account_id TEXT,
+                    conversation_id TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_repro_cap_ts ON reprocess_captured(ts)"
+            )
         _initialized = True
 
 
@@ -239,6 +252,42 @@ def record_reprocess(*, kind: str, count: int, status: str, detail: str | None =
                 """,
                 (_now_iso(), kind, int(count), status, detail),
             )
+
+
+def registrar_capturas_unicas(leads: list[dict[str, Any]]) -> int:
+    """Registra elegíveis únicos do dia. Retorna quantos eram novos (não re-soma a cada tick)."""
+    from app.services.tempo import hoje_iso
+
+    _ensure()
+    novos = 0
+    dia = hoje_iso()
+    with _lock:
+        with _conn() as conn:
+            for lead in leads:
+                account = lead.get("account_id")
+                conv = lead.get("conversation_id")
+                if account is None or conv is None:
+                    continue
+                key = f"{account}:{conv}:{dia}"
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO reprocess_captured
+                        (key, ts, account_id, conversation_id)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (key, _now_iso(), str(account), str(conv)),
+                )
+                if cur.rowcount:
+                    novos += 1
+            if novos:
+                conn.execute(
+                    """
+                    INSERT INTO reprocess_events (ts, kind, count, status, detail)
+                    VALUES (?, 'captured', ?, 'detected', ?)
+                    """,
+                    (_now_iso(), novos, f"unicos_novos={novos} somente_hoje=True"),
+                )
+    return novos
 
 
 def ja_enviado_reprocess(key: str) -> bool:
@@ -391,15 +440,43 @@ def snapshot() -> dict[str, Any]:
                 ).fetchall()
             ]
 
+            # enviados/erros: soma só eventos reais de POST (não stubs/dedup de tick)
             repro = conn.execute(
                 """
                 SELECT
-                    COALESCE(SUM(CASE WHEN kind='captured' THEN count ELSE 0 END),0) AS capturados,
                     COALESCE(SUM(CASE WHEN kind='sent' THEN count ELSE 0 END),0) AS enviados,
-                    COALESCE(SUM(CASE WHEN kind='stub' THEN count ELSE 0 END),0) AS stub,
-                    COALESCE(SUM(CASE WHEN kind='erro' THEN count ELSE 0 END),0) AS erros
+                    COALESCE(SUM(CASE WHEN kind='erro' AND status != 'sem_token' THEN count ELSE 0 END),0) AS erros
                 FROM reprocess_events
                 WHERE ts >= ? AND ts < ?
+                """,
+                (start, end),
+            ).fetchone()
+
+            capturados_unicos = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM reprocess_captured
+                WHERE ts >= ? AND ts < ?
+                """,
+                (start, end),
+            ).fetchone()
+            # fallback: só eventos já no formato único (nunca a soma bruta legada de ticks)
+            capturados_legado = conn.execute(
+                """
+                SELECT COALESCE(SUM(count),0) AS n
+                FROM reprocess_events
+                WHERE kind='captured' AND ts >= ? AND ts < ?
+                  AND detail LIKE 'unicos_novos=%'
+                """,
+                (start, end),
+            ).fetchone()
+
+            enviados_unicos = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM reprocess_sent
+                WHERE ts >= ? AND ts < ?
+                  AND status IN ('enfileirado','aceito','ok','ignorado')
                 """,
                 (start, end),
             ).fetchone()
@@ -465,10 +542,24 @@ def snapshot() -> dict[str, Any]:
             "nota": "Lab = GPU própria (custo USD ~0). OpenAI = estimativa de tabela.",
         },
         "reprocess_hoje": {
-            "capturados": int(repro["capturados"] or 0),
-            "enviados": int(repro["enviados"] or 0),
-            "stub": int(repro["stub"] or 0),
+            "capturados": int(
+                (capturados_unicos["n"] if capturados_unicos else 0)
+                or (capturados_legado["n"] if capturados_legado else 0)
+                or 0
+            ),
+            # Preferir únicos enfileirados; SUM(sent) só se a tabela sent estiver vazia
+            "enviados": int(
+                (enviados_unicos["n"] if enviados_unicos and enviados_unicos["n"] else 0)
+                or (repro["enviados"] or 0)
+                or 0
+            ),
+            # stub legado (soma de ticks) não é mais KPI — UI usa status ready
+            "stub": 0,
             "erros": int(repro["erros"] or 0),
+            "nota": (
+                "capturados/enviados = conversas únicas do dia "
+                "(não soma a cada varredura do poller)"
+            ),
         },
         "reprocess_recentes": recent_repro,
         "reprocess_enviados": enviados_recentes,

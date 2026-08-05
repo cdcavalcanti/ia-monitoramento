@@ -437,12 +437,7 @@ async def chatwoot_leads_silencio() -> dict[str, Any]:
     if resultado["status"] == "ok":
         ops_cache.set_chatwoot(dados, status="ok")
     if resultado["status"] == "ok" and elegiveis:
-        metrics.record_reprocess(
-            kind="captured",
-            count=len(elegiveis),
-            status="api_manual",
-            detail="GET /chatwoot/leads-silencio",
-        )
+        metrics.registrar_capturas_unicas(elegiveis)
     return {
         "status": resultado["status"],
         "fonte": resultado["fonte"],
@@ -470,12 +465,7 @@ async def chatwoot_reprocessar(body: ReprocessBody | None = None) -> dict[str, A
 
     elegiveis = list((resultado["dados"] or {}).get("leads_elegiveis_reprocessamento") or [])
     if elegiveis:
-        metrics.record_reprocess(
-            kind="captured",
-            count=len(elegiveis),
-            status="api_manual",
-            detail="POST /chatwoot/reprocessar",
-        )
+        metrics.registrar_capturas_unicas(elegiveis)
     envio = None
     if body.enviar:
         envio = await enviar_lote(elegiveis, force=bool(body.force))

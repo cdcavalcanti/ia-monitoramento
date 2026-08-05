@@ -708,9 +708,11 @@ async function refresh({ forceLight = true } = {}) {
     $("mTokens").textContent = fmtNum(llm.total_tokens);
     $("mTokensSub").textContent = `${fmtNum(llm.calls)} calls`;
     $("mCost").textContent = fmtUsd(llm.cost_usd);
-    $("mCap").textContent = fmtNum(repro.capturados);
+    // KPI principal = elegíveis AGORA (lista viva), não a soma histórica de ticks
+    $("mCap").textContent = fmtNum(cwFila);
     $("mSent").textContent = fmtNum(repro.enviados);
-    $("mSentSub").textContent = `stub ${fmtNum(repro.stub)} · err ${fmtNum(repro.erros)}`;
+    $("mSentSub").textContent =
+      `únicos dia ${fmtNum(repro.capturados)} · err ${fmtNum(repro.erros)}`;
     $("diaLabel").textContent = metrics.dia || "—";
 
     if (!reproCache) {

@@ -63,8 +63,8 @@ class Settings(BaseSettings):
     chatwoot_pause_labels: str = "pausar_ia,pausar-ia,pause_ia,ia_pausada"
     # Etiquetas de handoff/agendamento — também NÃO são elegíveis a reprocessar.
     chatwoot_skip_labels: str = (
-        "lead_agendado,transferido,atendimento_humano,humano,"
-        "handoff,agendado,consulta_agendada"
+        "lead_agendado,transferido,transferencia,transferência,"
+        "atendimento_humano,humano,handoff,agendado,consulta_agendada"
     )
 
     # ---- Sistema de reprocessamento (Francisco / chat-reprocessor) ----
