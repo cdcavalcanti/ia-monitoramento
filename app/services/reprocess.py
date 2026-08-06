@@ -1,13 +1,13 @@
 """Cliente do sistema de reprocessamento (Francisco / chat-reprocessor).
 
-Contrato oficial (doc 03/08/2026):
+Contrato oficial (docs/AUTOMATION_API.md — 06/08/2026):
   POST {BASE}/api/reprocess/automatic
   Auth: Authorization: Bearer <REPROCESS_API_TOKEN>  (ou X-Reprocess-Token)
   Body: { origem: "ia-monitoramento-infinity", motivo: "silencio_ia", leads: [...] }
   Sucesso: HTTP 202 + { ok, aceitos, ignorados, erros, resultados[] }
   Limite: 1–20 leads por lote (chunk automático aqui)
 
-Idempotência: calculada pelo Francisco (origem+conta+conversa+última msg).
+Idempotência + máx. 1 item ativo por conversa: calculados pelo Francisco.
 Dedup local por dia evita spam do poller.
 """
 
@@ -42,6 +42,19 @@ def _lead_key(lead: dict[str, Any]) -> str | None:
     if account is None or conv is None:
         return None
     return f"{account}:{conv}:{hoje_iso()}"
+
+
+def filtrar_pendentes_reprocess(leads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove leads já enfileirados / ja_processado hoje — não ficam no dash."""
+    out: list[dict[str, Any]] = []
+    for lead in leads:
+        if not isinstance(lead, dict):
+            continue
+        key = _lead_key(lead)
+        if key and metrics.ja_enviado_reprocess(key):
+            continue
+        out.append(lead)
+    return out
 
 
 def _filtrar_elegiveis(leads: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -232,6 +245,12 @@ async def enviar_lote(
             "reprocess dedup: %d já enfileirado(s) hoje — nada novo",
             len(pulados_dedup),
         )
+        try:
+            from app.services import ops_cache
+
+            ops_cache.limpar_elegiveis_ja_enviados()
+        except Exception:
+            pass
         return {
             "enviados": 0,
             "pulados": len(pulados_dedup),
@@ -335,4 +354,10 @@ async def enviar_lote(
         metrics.salvar_lote_reprocess(out)
     except Exception:
         logger.exception("falha ao salvar lote reprocess no painel")
+    try:
+        from app.services import ops_cache
+
+        ops_cache.limpar_elegiveis_ja_enviados()
+    except Exception:
+        logger.exception("falha ao limpar elegíveis já enviados do dash")
     return out

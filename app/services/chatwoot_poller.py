@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from app.collectors import chatwoot_health
 from app.config import get_settings
@@ -23,8 +24,13 @@ _tick_lock = asyncio.Lock()
 
 async def _loop() -> None:
     s = get_settings()
-    intervalo = max(15.0, float(s.chatwoot_poll_seconds))
-    logger.info("chatwoot poller ativo a cada %.0fs (silêncio>=%.0fmin)", intervalo, s.chatwoot_silence_minutes)
+    # Mínimo 120s: varredura multi-conta costuma passar de 1 min.
+    intervalo = max(120.0, float(s.chatwoot_poll_seconds))
+    logger.info(
+        "chatwoot poller ativo a cada %.0fs (silêncio>=%.0fmin)",
+        intervalo,
+        s.chatwoot_silence_minutes,
+    )
     # dá tempo do dash responder no boot antes da 1ª varredura pesada
     try:
         await asyncio.wait_for(_stop.wait(), timeout=8.0)
@@ -46,7 +52,7 @@ async def _loop() -> None:
 
 
 async def _tick() -> None:
-    # evita sobreposição se algum dia o intervalo for menor que a varredura
+    # evita sobreposição se a varredura passar do intervalo
     if _tick_lock.locked():
         logger.warning("poller: tick anterior ainda rodando — pulando")
         return
@@ -62,7 +68,22 @@ async def _tick_inner() -> None:
         logger.warning("poller: credenciais Chatwoot incompletas (BASE_URL/TOKEN/ACCOUNTS)")
         return
 
-    resultado = await chatwoot_health.coletar()
+    async def on_progress(novos_conta: list[dict[str, Any]], _parcial: dict[str, Any]) -> None:
+        """Envia assim que a conta fecha — já vem revalidado pelo coletor."""
+        if not novos_conta:
+            return
+        novos = metrics.registrar_capturas_unicas(novos_conta)
+        if novos:
+            logger.info("poller: %s elegível(is) novo(s) nesta conta", novos)
+        envio = await enviar_lote(novos_conta)
+        logger.info(
+            "poller reprocess parcial: status=%s aceitos=%s ignorados=%s",
+            envio.get("status"),
+            envio.get("aceitos") or envio.get("enviados"),
+            envio.get("ignorados") or envio.get("pulados"),
+        )
+
+    resultado = await chatwoot_health.coletar(on_progress=on_progress)
     if resultado["status"] != "ok":
         logger.warning("poller: coleta status=%s dados=%s", resultado["status"], resultado.get("dados"))
         return
@@ -86,14 +107,10 @@ async def _tick_inner() -> None:
             "pausados": tot.get("pausados_com_silencio"),
         },
     )
-    if elegiveis:
-        novos = metrics.registrar_capturas_unicas(elegiveis)
-        if novos:
-            logger.info("poller: %s elegível(is) novo(s) hoje", novos)
-
+    # Dedup local: reenvio no fim só pega quem o progresso parcial não cobriu.
     if elegiveis:
         envio = await enviar_lote(elegiveis)
-        logger.info("poller reprocess: %s", envio.get("status"))
+        logger.info("poller reprocess final: %s", envio.get("status"))
 
 
 async def start() -> None:

@@ -55,10 +55,11 @@ class Settings(BaseSettings):
     # Só considera silêncio cujo último incoming é do dia corrente (timezone do REPORT).
     chatwoot_only_today: bool = True
     # Poller contínuo (só se health_enabled). 0 = desliga o poller.
-    chatwoot_poll_seconds: float = 60.0
+    # 180s: a varredura de ~15 contas passa de 60s; intervalo curto só empilhava trabalho.
+    chatwoot_poll_seconds: float = 180.0
     # Limites POR CONTA (não globais).
-    chatwoot_max_pages: int = 5
-    chatwoot_max_conversations: int = 80
+    chatwoot_max_pages: int = 4
+    chatwoot_max_conversations: int = 40
     # Etiquetas que bloqueiam reprocessamento (separadas por vírgula).
     chatwoot_pause_labels: str = "pausar_ia,pausar-ia,pause_ia,ia_pausada"
     # Etiquetas de handoff/agendamento — também NÃO são elegíveis a reprocessar.

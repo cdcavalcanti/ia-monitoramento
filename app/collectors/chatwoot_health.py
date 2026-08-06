@@ -633,7 +633,146 @@ async def _varrer_conta(
     }
 
 
-async def _varrer_candidatos() -> dict[str, Any]:
+async def revalidar_leads_elegiveis(
+    leads: list[dict[str, Any]],
+    *,
+    concurrency: int = 8,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Reconsulta o Chatwoot e remove quem a IA/humano já respondeu (ou deixou de elegível).
+
+    O cache do dash pode ficar velho entre varreduras longas — sem isso, um lead
+    respondido há 1 min continua na lista com '568 min de silêncio'.
+    """
+    import asyncio
+
+    s = get_settings()
+    if not leads:
+        return [], []
+
+    silencio = float(s.chatwoot_silence_minutes)
+    pause_labels = set(s.pause_labels)
+    skip_labels = set(s.skip_labels)
+    only_today = bool(s.chatwoot_only_today)
+    timezone_name = s.report_timezone
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _um(lead: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        account_id = lead.get("account_id")
+        cid = lead.get("conversation_id")
+        if account_id is None or cid is None:
+            return None, lead
+        async with sem:
+            try:
+                client = ChatwootHealthClient(
+                    s.chatwoot_base_url, str(account_id), s.chatwoot_api_token
+                )
+                msgs = await client.mensagens(cid)
+                labs = await client.listar_labels(cid)
+            except Exception:
+                logger.warning(
+                    "revalidar falhou account=%s conv=%s — mantém no cache",
+                    account_id,
+                    cid,
+                    exc_info=True,
+                )
+                return lead, None
+
+        conv = {
+            "id": cid,
+            "inbox_id": lead.get("inbox_id"),
+            "status": lead.get("status_conversa") or "open",
+            "labels": labs or lead.get("labels") or [],
+            "meta": {
+                "sender": {
+                    "name": lead.get("nome"),
+                    "phone_number": lead.get("telefone"),
+                }
+            },
+        }
+        item = analisar_conversa(
+            conv,
+            msgs,
+            silencio_minutos=silencio,
+            pause_labels=pause_labels,
+            skip_labels=skip_labels,
+            account_id=str(account_id),
+            account_nome=str(lead.get("cliente") or lead.get("account_nome") or ""),
+            base_url=s.chatwoot_base_url,
+            only_today=only_today,
+            timezone_name=timezone_name,
+        )
+        if item and item.get("elegivel_reprocessamento") and not item.get("pausado"):
+            return item, None
+        return None, lead
+
+    pares = await asyncio.gather(*[_um(l) for l in leads if isinstance(l, dict)])
+    ainda: list[dict[str, Any]] = []
+    removidos: list[dict[str, Any]] = []
+    for ok, drop in pares:
+        if ok is not None:
+            ainda.append(ok)
+        if drop is not None:
+            removidos.append(drop)
+    if removidos:
+        logger.info(
+            "revalidar: removeu %s lead(s) que deixaram de ser elegíveis (ex.: IA respondeu)",
+            len(removidos),
+        )
+    return ainda, removidos
+
+
+async def _montar_resultado(
+    *,
+    silencio: float,
+    only_today: bool,
+    timezone_name: str,
+    pause_labels: set[str],
+    skip_labels: set[str],
+    contas_cfg: list[dict[str, Any]],
+    por_conta: list[dict[str, Any]],
+    elegiveis: list[dict[str, Any]],
+    pausados: list[dict[str, Any]],
+    analisadas: int,
+    erros_msg: int,
+    contas_ativas: int,
+    contas_skipped: int,
+) -> dict[str, Any]:
+    eleg_sorted = sorted(
+        elegiveis,
+        key=lambda x: float(x.get("minutos_sem_resposta") or 0),
+        reverse=True,
+    )
+    return {
+        "silencio_minutos": silencio,
+        "somente_hoje": only_today,
+        "timezone": timezone_name,
+        "pause_labels": sorted(pause_labels),
+        "skip_labels": sorted(skip_labels),
+        "contas": list(por_conta),
+        "conversas_analisadas": analisadas,
+        "erros_ao_ler_mensagens": erros_msg,
+        "leads_elegiveis_reprocessamento": eleg_sorted,
+        "leads_pausados_ignorados": list(pausados),
+        "totais": {
+            "contas": len(contas_cfg),
+            "contas_ativas": contas_ativas,
+            "contas_sem_inbox": contas_skipped,
+            "elegiveis": len(eleg_sorted),
+            "pausados_com_silencio": len(pausados),
+            "contas_varridas": len(por_conta),
+        },
+        "limitacao_causa": (
+            "Chatwoot sozinho não expõe o stack trace da IA. "
+            "causa_suspeita só vem de label/nota/atributo explícito; "
+            "senão fica null (silêncio sem causa conhecida)."
+        ),
+    }
+
+
+async def _varrer_candidatos(
+    *,
+    on_progress: Any | None = None,
+) -> dict[str, Any]:
     s = get_settings()
     silencio = float(s.chatwoot_silence_minutes)
     pause_labels = set(s.pause_labels)
@@ -672,7 +811,19 @@ async def _varrer_candidatos() -> dict[str, Any]:
             contas_skipped += 1
         else:
             contas_ativas += 1
-        elegiveis.extend(res["elegiveis"])
+
+        # Segunda leitura imediata: se a IA respondeu entre listar e agora, não publica.
+        eleg_conta = list(res["elegiveis"] or [])
+        if eleg_conta:
+            eleg_conta, removidos_agora = await revalidar_leads_elegiveis(eleg_conta)
+            if removidos_agora:
+                logger.info(
+                    "conta %s: %s candidato(s) descartado(s) — IA/humano já respondeu",
+                    conta["nome"],
+                    len(removidos_agora),
+                )
+
+        elegiveis.extend(eleg_conta)
         pausados.extend(res["pausados"])
         analisadas += int(res["conversas_analisadas"])
         erros_msg += int(res["erros_ao_ler_mensagens"])
@@ -682,7 +833,7 @@ async def _varrer_candidatos() -> dict[str, Any]:
                 "account_nome": res["account_nome"],
                 "inbox_ids": res.get("inbox_ids") or [],
                 "conversas_analisadas": res["conversas_analisadas"],
-                "elegiveis": len(res["elegiveis"]),
+                "elegiveis": len(eleg_conta),
                 "pausados_com_silencio": len(res["pausados"]),
                 "erros_ao_ler_mensagens": res["erros_ao_ler_mensagens"],
                 "erro": res["erro"],
@@ -695,39 +846,51 @@ async def _varrer_candidatos() -> dict[str, Any]:
             conta["id"],
             inbox_ids,
             res["conversas_analisadas"],
-            len(res["elegiveis"]),
+            len(eleg_conta),
             len(res["pausados"]),
             res["erro"],
         )
 
-    elegiveis.sort(key=lambda x: float(x.get("minutos_sem_resposta") or 0), reverse=True)
-    return {
-        "silencio_minutos": silencio,
-        "somente_hoje": only_today,
-        "timezone": timezone_name,
-        "pause_labels": sorted(pause_labels),
-        "skip_labels": sorted(skip_labels),
-        "contas": por_conta,
-        "conversas_analisadas": analisadas,
-        "erros_ao_ler_mensagens": erros_msg,
-        "leads_elegiveis_reprocessamento": elegiveis,
-        "leads_pausados_ignorados": pausados,
-        "totais": {
-            "contas": len(contas),
-            "contas_ativas": contas_ativas,
-            "contas_sem_inbox": contas_skipped,
-            "elegiveis": len(elegiveis),
-            "pausados_com_silencio": len(pausados),
-        },
-        "limitacao_causa": (
-            "Chatwoot sozinho não expõe o stack trace da IA. "
-            "causa_suspeita só vem de label/nota/atributo explícito; "
-            "senão fica null (silêncio sem causa conhecida)."
-        ),
-    }
+        # Publica progresso: UI não fica vazia até o fim das 15 contas.
+        parcial = await _montar_resultado(
+            silencio=silencio,
+            only_today=only_today,
+            timezone_name=timezone_name,
+            pause_labels=pause_labels,
+            skip_labels=skip_labels,
+            contas_cfg=contas,
+            por_conta=por_conta,
+            elegiveis=elegiveis,
+            pausados=pausados,
+            analisadas=analisadas,
+            erros_msg=erros_msg,
+            contas_ativas=contas_ativas,
+            contas_skipped=contas_skipped,
+        )
+        from app.services import ops_cache
+
+        ops_cache.set_chatwoot(parcial, status="ok")
+        if on_progress is not None:
+            await on_progress(list(eleg_conta), parcial)
+
+    return await _montar_resultado(
+        silencio=silencio,
+        only_today=only_today,
+        timezone_name=timezone_name,
+        pause_labels=pause_labels,
+        skip_labels=skip_labels,
+        contas_cfg=contas,
+        por_conta=por_conta,
+        elegiveis=elegiveis,
+        pausados=pausados,
+        analisadas=analisadas,
+        erros_msg=erros_msg,
+        contas_ativas=contas_ativas,
+        contas_skipped=contas_skipped,
+    )
 
 
-async def coletar() -> ColetaResult:
+async def coletar(*, on_progress: Any | None = None) -> ColetaResult:
     s = get_settings()
     if not s.chatwoot_health_enabled:
         return resultado_stub(
@@ -745,7 +908,7 @@ async def coletar() -> ColetaResult:
         )
 
     try:
-        dados = await _varrer_candidatos()
+        dados = await _varrer_candidatos(on_progress=on_progress)
         return resultado_ok(FONTE, dados)
     except Exception as e:
         logger.exception("chatwoot health falhou")

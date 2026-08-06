@@ -347,6 +347,7 @@ async def ops_live() -> dict[str, Any]:
 
 
 _last_light_refresh: float = 0.0
+_last_cw_revalidate: float = 0.0
 _light_lock: asyncio.Lock | None = None
 
 
@@ -359,10 +360,10 @@ def _get_light_lock() -> asyncio.Lock:
 
 @app.post("/ops/refresh-live")
 async def ops_refresh_live() -> dict[str, Any]:
-    """Atualiza Hub agora (leve). Debounce ~15s pra não martelar APIs."""
+    """Atualiza Hub + revalida elegíveis Chatwoot (tira quem a IA já respondeu)."""
     import time
 
-    global _last_light_refresh
+    global _last_light_refresh, _last_cw_revalidate
     async with _get_light_lock():
         agora = time.monotonic()
         skipped = agora - _last_light_refresh < 15.0
@@ -378,6 +379,34 @@ async def ops_refresh_live() -> dict[str, Any]:
             except Exception as e:
                 logger.exception("refresh-live falhou")
                 raise HTTPException(500, str(e)) from e
+
+        # Revalida elegíveis a cada ~20s (barato vs varredura completa).
+        if settings.chatwoot_health_enabled and agora - _last_cw_revalidate >= 20.0:
+            _last_cw_revalidate = agora
+            try:
+                from app.collectors.chatwoot_health import revalidar_leads_elegiveis
+
+                cw = ops_cache.get_chatwoot_raw()
+                antigos = list((cw or {}).get("elegiveis") or [])
+                if antigos:
+                    ainda, removidos = await revalidar_leads_elegiveis(antigos)
+                    if removidos:
+                        ops_cache.patch_chatwoot_elegiveis(ainda, removidos=len(removidos))
+                        logger.info(
+                            "refresh-live: %s elegível(is) removido(s) após resposta da IA",
+                            len(removidos),
+                        )
+                    elif ainda:
+                        ops_cache.patch_chatwoot_elegiveis(ainda, removidos=0)
+                    # também tira ja_processado / já enfileirado hoje
+                    n_dedup = ops_cache.limpar_elegiveis_ja_enviados()
+                    if n_dedup:
+                        logger.info(
+                            "refresh-live: %s elegível(is) ocultado(s) — já tratados hoje",
+                            n_dedup,
+                        )
+            except Exception:
+                logger.exception("revalidação Chatwoot no refresh-live falhou")
 
     return {
         "ok": True,

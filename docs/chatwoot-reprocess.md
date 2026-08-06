@@ -9,7 +9,7 @@
 5. Se elegível → POST no **chat-reprocessor** (fila automática do Francisco).
 6. Poller a cada `CHATWOOT_POLL_SECONDS` + botão **Reprocessar agora** no dash + seção no relatório.
 
-## Contrato (validado em `IAINFINITY/chat-reprocessor`)
+## Contrato (doc Francisco 06/08/2026 — `docs/AUTOMATION_API.md`)
 
 | Item | Valor |
 |------|--------|
@@ -18,6 +18,8 @@
 | Método | `POST` |
 | Auth | `Authorization: Bearer <REPROCESS_API_TOKEN>` **ou** `X-Reprocess-Token` |
 | Sucesso | **HTTP 202** + `{ ok, aceitos, ignorados, erros, resultados[] }` |
+
+A API revalida no Chatwoot, permite **1 item ativo por conversa** (`ja_processado` se já houver `pending`/`running`) e o worker revalida de novo antes do n8n (`canceled` se deixou de ser elegível). **Nada disso exige mudança no monitor** — já alinhado.
 
 Body:
 

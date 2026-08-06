@@ -198,7 +198,12 @@ def _log_conta(c: dict[str, Any]) -> str:
 
 
 def set_chatwoot(dados: dict[str, Any], *, status: str = "ok") -> None:
-    elegiveis = list(dados.get("leads_elegiveis_reprocessamento") or [])
+    from app.services.reprocess import filtrar_pendentes_reprocess
+
+    # Não mostrar no dash quem já foi enfileirado / ja_processado hoje.
+    elegiveis = filtrar_pendentes_reprocess(
+        list(dados.get("leads_elegiveis_reprocessamento") or [])
+    )
     pausados = list(dados.get("leads_pausados_ignorados") or [])
     silencio = float(dados.get("silencio_minutos") or 5)
     somente_hoje = bool(dados.get("somente_hoje", True))
@@ -207,7 +212,7 @@ def set_chatwoot(dados: dict[str, Any], *, status: str = "ok") -> None:
     for x in elegiveis[:80]:
         slim_e.append(
             {
-                "cliente": x.get("account_nome"),
+                "cliente": x.get("account_nome") or x.get("cliente"),
                 "account_id": x.get("account_id"),
                 "conversation_id": x.get("conversation_id"),
                 "inbox_id": x.get("inbox_id"),
@@ -255,12 +260,14 @@ def set_chatwoot(dados: dict[str, Any], *, status: str = "ok") -> None:
         item["log"] = _log_conta(item)
         por_conta.append(item)
 
+    totais = dict(dados.get("totais") or {})
+    totais["elegiveis"] = len(slim_e)
     payload = {
         "atualizado_em": _now(),
         "status": status,
         "somente_hoje": somente_hoje,
         "silencio_minutos": silencio,
-        "totais": dados.get("totais") or {},
+        "totais": totais,
         "conversas_analisadas": dados.get("conversas_analisadas"),
         "por_conta": por_conta,
         "elegiveis": slim_e,
@@ -431,6 +438,75 @@ def _sanear_painel_view(painel: dict[str, Any] | None) -> dict[str, Any] | None:
         and str(s.get("tipo") or "").lower() not in ("waha", "waha_numero")
     ]
     return out
+
+
+def get_chatwoot_raw() -> dict[str, Any] | None:
+    with _lock:
+        cw = _cache.get("chatwoot")
+        return dict(cw) if isinstance(cw, dict) else None
+
+
+def patch_chatwoot_elegiveis(
+    elegiveis_full: list[dict[str, Any]],
+    *,
+    removidos: int = 0,
+) -> None:
+    """Atualiza só a lista de elegíveis no cache (após revalidação rápida)."""
+    from app.services.reprocess import filtrar_pendentes_reprocess
+
+    with _lock:
+        cw = _cache.get("chatwoot")
+        if not isinstance(cw, dict):
+            return
+        cw = dict(cw)
+
+    elegiveis_full = filtrar_pendentes_reprocess(list(elegiveis_full or []))
+    silencio = float(cw.get("silencio_minutos") or 5)
+    somente_hoje = bool(cw.get("somente_hoje", True))
+    slim_e = []
+    for x in elegiveis_full[:80]:
+        slim_e.append(
+            {
+                "cliente": x.get("account_nome") or x.get("cliente"),
+                "account_id": x.get("account_id"),
+                "conversation_id": x.get("conversation_id"),
+                "inbox_id": x.get("inbox_id"),
+                "nome": x.get("nome"),
+                "telefone": x.get("telefone"),
+                "minutos_sem_resposta": x.get("minutos_sem_resposta"),
+                "link": x.get("link"),
+                "pausado": False,
+                "causa_suspeita": x.get("causa_suspeita"),
+                "ultimo_incoming_em": x.get("ultimo_incoming_em"),
+                "labels": x.get("labels") or [],
+                "log": _log_chatwoot_elegivel(x, silencio=silencio, somente_hoje=somente_hoje),
+            }
+        )
+    totais = dict(cw.get("totais") or {})
+    totais["elegiveis"] = len(slim_e)
+    cw["elegiveis"] = slim_e
+    cw["totais"] = totais
+    cw["atualizado_em"] = _now()
+    if removidos:
+        cw["revalidacao"] = {"removidos": int(removidos), "em": cw["atualizado_em"]}
+    with _lock:
+        _cache["chatwoot"] = cw
+        _persist()
+
+
+def limpar_elegiveis_ja_enviados() -> int:
+    """Tira da fila do dash quem já está em reprocess_sent hoje (enfileirado/ja_processado)."""
+    from app.services.reprocess import filtrar_pendentes_reprocess
+
+    cw = get_chatwoot_raw()
+    if not cw:
+        return 0
+    antes = list(cw.get("elegiveis") or [])
+    depois = filtrar_pendentes_reprocess(antes)
+    removidos = len(antes) - len(depois)
+    if removidos:
+        patch_chatwoot_elegiveis(depois, removidos=removidos)
+    return removidos
 
 
 def get_all() -> dict[str, Any]:
