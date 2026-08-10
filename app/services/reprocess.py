@@ -45,13 +45,17 @@ def _lead_key(lead: dict[str, Any]) -> str | None:
 
 
 def filtrar_pendentes_reprocess(leads: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove leads já enfileirados / ja_processado hoje — não ficam no dash."""
+    """Remove do dash só quem foi enfileirado de verdade hoje.
+
+    ja_processado NÃO oculta — senão some da lista sem reprocessar/responder.
+    O dedup de envio (ja_enviado_reprocess) continua evitando spam na API.
+    """
     out: list[dict[str, Any]] = []
     for lead in leads:
         if not isinstance(lead, dict):
             continue
         key = _lead_key(lead)
-        if key and metrics.ja_enviado_reprocess(key):
+        if key and metrics.deve_ocultar_elegivel_dash(key):
             continue
         out.append(lead)
     return out

@@ -168,6 +168,8 @@ async def health() -> dict[str, Any]:
         "waha_health": False,
         "alert_poller": settings.alert_poller_enabled,
         "reprocess": settings.reprocess_ready,
+        "reprocess_enabled": bool(settings.reprocess_enabled),
+        "reprocess_token": bool(settings.reprocess_api_token),
         "scheduler": settings.scheduler_enabled,
         "report_slots": [f"{h:02d}:{m:02d}" for h, m in horarios_relatorio()],
         "report_at": f"{settings.report_hour:02d}:{settings.report_minute:02d} {settings.report_timezone}",

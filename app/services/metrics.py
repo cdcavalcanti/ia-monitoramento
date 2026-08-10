@@ -291,7 +291,7 @@ def registrar_capturas_unicas(leads: list[dict[str, Any]]) -> int:
 
 
 def ja_enviado_reprocess(key: str) -> bool:
-    """True se já enfileiramos este lead hoje (dedup local)."""
+    """True se já enfileiramos / registramos este lead hoje (dedup de envio)."""
     _ensure()
     with _lock:
         with _conn() as conn:
@@ -300,6 +300,28 @@ def ja_enviado_reprocess(key: str) -> bool:
                 (key,),
             ).fetchone()
             return bool(row)
+
+
+def status_reprocess(key: str) -> str | None:
+    """Status local do lead hoje, ou None."""
+    _ensure()
+    with _lock:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT status FROM reprocess_sent WHERE key = ? LIMIT 1",
+                (key,),
+            ).fetchone()
+            return str(row["status"]) if row and row["status"] else None
+
+
+def deve_ocultar_elegivel_dash(key: str) -> bool:
+    """Só some do dash se entrou de verdade na fila (enfileirado).
+
+    ja_processado continua no dedup de envio (não spam), mas NÃO some da lista —
+    senão o usuário vê o lead sumir sem a IA ter respondido.
+    """
+    st = status_reprocess(key)
+    return st == "enfileirado"
 
 
 def marcar_enviado_reprocess(

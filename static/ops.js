@@ -828,6 +828,7 @@ $("btnRelatorio").addEventListener("click", async () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enviar: true, forcar: true }),
+      timeoutMs: 300000,
     });
     showLog(`Relatório ok · whatsapp=${data.enviado_whatsapp}`);
     await refresh();
@@ -844,7 +845,7 @@ $("btnSilencio").addEventListener("click", async () => {
   const old = btn.textContent;
   btn.textContent = "Varrendo…";
   try {
-    const data = await fetchJson("/chatwoot/leads-silencio");
+    const data = await fetchJson("/chatwoot/leads-silencio", { timeoutMs: 300000 });
     await refresh();
     showLog(`Varredura ${data.status} · elegíveis=${data.dados?.totais?.elegiveis ?? 0}`);
   } catch (err) {
@@ -911,6 +912,8 @@ $("chatForm").addEventListener("submit", async (e) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pergunta, thread_id: "ops-ui" }),
+      // Lab/OpenAI facilmente passam de 12s — default do fetchJson é curto demais
+      timeoutMs: 180000,
     });
     addBubble("bot", data.resposta || "(sem resposta)");
     await refresh();

@@ -791,6 +791,20 @@ async def _varrer_candidatos(
     contas_ativas = 0
     contas_skipped = 0
 
+    # Mantém elegíveis de contas ainda não varridas neste ciclo (evita lista piscar 0).
+    from app.services import ops_cache
+
+    prev_cw = ops_cache.get_chatwoot_raw() or {}
+    prev_por_conta: dict[str, list[dict[str, Any]]] = {}
+    for e in prev_cw.get("elegiveis") or []:
+        if not isinstance(e, dict):
+            continue
+        aid = str(e.get("account_id") if e.get("account_id") is not None else "")
+        if not aid:
+            continue
+        prev_por_conta.setdefault(aid, []).append(e)
+    contas_feitas: set[str] = set()
+
     for conta in contas:
         client = ChatwootHealthClient(s.chatwoot_base_url, conta["id"], s.chatwoot_api_token)
         inbox_ids = list(conta.get("inbox_ids") or [])
@@ -827,6 +841,8 @@ async def _varrer_candidatos(
         pausados.extend(res["pausados"])
         analisadas += int(res["conversas_analisadas"])
         erros_msg += int(res["erros_ao_ler_mensagens"])
+        aid_str = str(res["account_id"])
+        contas_feitas.add(aid_str)
         por_conta.append(
             {
                 "account_id": res["account_id"],
@@ -851,7 +867,21 @@ async def _varrer_candidatos(
             res["erro"],
         )
 
-        # Publica progresso: UI não fica vazia até o fim das 15 contas.
+        # Merge: resultado parcial deste ciclo + elegíveis antigos de contas ainda não varridas.
+        display: list[dict[str, Any]] = list(elegiveis)
+        for aid, leads_prev in prev_por_conta.items():
+            if aid in contas_feitas:
+                continue
+            for lead in leads_prev:
+                display.append(
+                    {
+                        **lead,
+                        "account_nome": lead.get("cliente") or lead.get("account_nome"),
+                        "elegivel_reprocessamento": True,
+                        "pausado": False,
+                    }
+                )
+
         parcial = await _montar_resultado(
             silencio=silencio,
             only_today=only_today,
@@ -860,15 +890,13 @@ async def _varrer_candidatos(
             skip_labels=skip_labels,
             contas_cfg=contas,
             por_conta=por_conta,
-            elegiveis=elegiveis,
+            elegiveis=display,
             pausados=pausados,
             analisadas=analisadas,
             erros_msg=erros_msg,
             contas_ativas=contas_ativas,
             contas_skipped=contas_skipped,
         )
-        from app.services import ops_cache
-
         ops_cache.set_chatwoot(parcial, status="ok")
         if on_progress is not None:
             await on_progress(list(eleg_conta), parcial)
