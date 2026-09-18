@@ -25,7 +25,8 @@ def main() -> None:
                     "cliente": "Acme",
                     "projeto": "IA Atendimento",
                     "responsavel": "Ana",
-                    "coluna": "Atrasado",
+                    # Formato real da API do Gestão: coluna = {id, rotulo}.
+                    "coluna": {"id": "atrasado", "rotulo": "Atrasado"},
                     "diasAtraso": 5,
                 },
                 {
@@ -33,7 +34,7 @@ def main() -> None:
                     "cliente": "Acme",
                     "projeto": "IA Atendimento",
                     "responsavel": "Ana",
-                    "coluna": "Desenvolvimento",
+                    "coluna": {"id": "validacao", "rotulo": "Validação"},
                     "diasAtraso": 0,
                 },
                 {
@@ -41,14 +42,16 @@ def main() -> None:
                     "cliente": "Beta",
                     "projeto": "Landing",
                     "responsavel": "Bruno",
-                    "coluna": "Vencimento Hoje",
+                    "coluna": {"id": "hoje", "rotulo": "Vencimento hoje"},
                 },
                 {
                     "titulo": "Entrega X",
                     "cliente": "Beta",
                     "projeto": "Landing",
                     "responsavel": "Bruno",
-                    "coluna": "Concluído",
+                    "coluna": {"id": "entregues", "rotulo": "Entregues"},
+                    # atraso histórico em entregue NÃO conta como atrasada
+                    "diasAtraso": 12,
                     "resumoStatus": "Subiu LP e pediu ok do cliente.",
                 },
             ],
@@ -76,7 +79,8 @@ def main() -> None:
     assert snap["gestao"]["totais"]["atrasadas"] == 1, snap["gestao"]["totais"]
     assert snap["gestao"]["totais"]["vencimento_hoje"] == 1
     assert snap["gestao"]["totais"]["em_desenvolvimento"] >= 1
-    assert any("atrasada" in a.lower() for a in snap["alertas"])
+    assert snap["gestao"]["totais"]["com_resumo_status"] == 1
+    assert any(a.startswith("1 tarefa(s) na coluna Atrasado") for a in snap["alertas"]), snap["alertas"]
     assert snap["fontes"]["painel"]["status"] == "stub"
     print("smoke_aggregator OK")
     print("totais:", snap["gestao"]["totais"])

@@ -16,6 +16,7 @@ Caso contrário: silencio_sem_causa_explicita.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -29,6 +30,31 @@ from app.config import get_settings
 logger = logging.getLogger("monitor.chatwoot")
 
 FONTE = "chatwoot-ias"
+
+# Conexão reaproveitada + teto de requisições simultâneas, compartilhados por
+# todas as contas (varredura, revalidação do dash). Cliente novo por request
+# custava um handshake TLS cada: ~1,3 s vs ~0,6 s reaproveitando.
+# ponytail: o cliente de um loop anterior (só em scripts com vários asyncio.run) não é fechado.
+_pool: tuple[asyncio.AbstractEventLoop, httpx.AsyncClient, asyncio.Semaphore] | None = None
+_TENTATIVAS_429 = 4
+
+
+def _pool_do_loop() -> tuple[httpx.AsyncClient, asyncio.Semaphore]:
+    global _pool
+    loop = asyncio.get_running_loop()
+    if _pool is None or _pool[0] is not loop:
+        n = max(1, int(get_settings().chatwoot_concurrency))
+        client = httpx.AsyncClient(limits=httpx.Limits(max_connections=n, max_keepalive_connections=n))
+        _pool = (loop, client, asyncio.Semaphore(n))
+    return _pool[1], _pool[2]
+
+
+def _espera_429(resp: httpx.Response, tentativa: int) -> float:
+    try:
+        retry_after = float(resp.headers.get("Retry-After") or 0)
+    except ValueError:
+        retry_after = 0.0
+    return min(retry_after or 2.0 ** tentativa, 30.0)
 
 # Labels que indicam "humano/kill-switch — não mexer".
 PAUSE_LABEL_ALIASES_DEFAULT = ("pausar_ia", "pausar-ia", "pause_ia", "ia_pausada")
@@ -120,8 +146,15 @@ class ChatwootHealthClient:
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.get(url, headers=self._headers(), params=params or {})
+        client, sem = _pool_do_loop()
+        for tentativa in range(_TENTATIVAS_429):
+            async with sem:
+                resp = await client.get(url, headers=self._headers(), params=params or {}, timeout=self.timeout)
+            if resp.status_code == 429 and tentativa < _TENTATIVAS_429 - 1:
+                espera = _espera_429(resp, tentativa)
+                logger.warning("chatwoot 429 em %s — esperando %.0fs", path, espera)
+                await asyncio.sleep(espera)  # fora do semáforo: libera a vaga enquanto espera
+                continue
             resp.raise_for_status()
             return resp.json()
 
@@ -543,6 +576,43 @@ async def _varrer_conta(
             "pausados": [],
         }
 
+    def _analisar(conv: dict[str, Any], msgs: Any) -> dict[str, Any] | None:
+        return analisar_conversa(
+            conv,
+            msgs,
+            silencio_minutos=silencio,
+            pause_labels=pause_labels,
+            skip_labels=skip_labels,
+            account_id=client.account_id,
+            account_nome=account_nome,
+            base_url=base_url,
+            only_today=only_today,
+            timezone_name=timezone_name,
+        )
+
+    async def _uma(conv: dict[str, Any], inbox: str) -> tuple[bool, dict[str, Any] | None]:
+        """(erro, item) de uma conversa. Roda em paralelo; o teto é o semáforo do pool."""
+        cid = conv["id"]
+        try:
+            msgs = await client.mensagens(cid)
+            item = _analisar(conv, msgs)
+            # Se passou no filtro de silêncio/hoje, confirma etiquetas na API
+            # (pausar_ia / transferência às vezes não vêm no list).
+            if item:
+                labs = await client.listar_labels(cid)
+                if labs:
+                    item = _analisar({**conv, "labels": labs}, msgs)
+            return False, item
+        except Exception:
+            logger.warning(
+                "falha ao ler mensagens conta=%s inbox=%s conversa=%s",
+                client.account_id,
+                inbox,
+                cid,
+                exc_info=True,
+            )
+            return True, None
+
     try:
         for inbox in inbox_ids:
             if analisadas >= max_convs:
@@ -555,58 +625,21 @@ async def _varrer_conta(
                 if not convs:
                     break
 
+                lote: list[dict[str, Any]] = []
                 for conv in convs:
-                    if analisadas >= max_convs:
+                    if analisadas + len(lote) >= max_convs:
                         break
-                    cid = conv.get("id")
-                    if cid is None:
+                    if conv.get("id") is None:
                         continue
                     if not conv.get("inbox_id"):
                         conv = {**conv, "inbox_id": int(inbox) if str(inbox).isdigit() else inbox}
-                    analisadas += 1
-                    try:
-                        msgs = await client.mensagens(cid)
-                        item = analisar_conversa(
-                            conv,
-                            msgs,
-                            silencio_minutos=silencio,
-                            pause_labels=pause_labels,
-                            skip_labels=skip_labels,
-                            account_id=client.account_id,
-                            account_nome=account_nome,
-                            base_url=base_url,
-                            only_today=only_today,
-                            timezone_name=timezone_name,
-                        )
-                        # Se passou no filtro de silêncio/hoje, confirma etiquetas na API
-                        # (pausar_ia / transferência às vezes não vêm no list).
-                        if item:
-                            labs = await client.listar_labels(cid)
-                            if labs:
-                                conv_l = {**conv, "labels": labs}
-                                item = analisar_conversa(
-                                    conv_l,
-                                    msgs,
-                                    silencio_minutos=silencio,
-                                    pause_labels=pause_labels,
-                                    skip_labels=skip_labels,
-                                    account_id=client.account_id,
-                                    account_nome=account_nome,
-                                    base_url=base_url,
-                                    only_today=only_today,
-                                    timezone_name=timezone_name,
-                                )
-                    except Exception:
-                        erros_msg += 1
-                        logger.warning(
-                            "falha ao ler mensagens conta=%s inbox=%s conversa=%s",
-                            client.account_id,
-                            inbox,
-                            cid,
-                            exc_info=True,
-                        )
-                        continue
+                    lote.append(conv)
+                analisadas += len(lote)
 
+                for erro, item in await asyncio.gather(*[_uma(conv, inbox) for conv in lote]):
+                    if erro:
+                        erros_msg += 1
+                        continue
                     if not item:
                         continue
                     if item.get("pausado") or not item.get("elegivel_reprocessamento"):

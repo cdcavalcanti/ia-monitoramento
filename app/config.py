@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # Limites POR CONTA (não globais).
     chatwoot_max_pages: int = 4
     chatwoot_max_conversations: int = 40
+    # Requisições simultâneas ao Chatwoot (teto global, conexão reaproveitada).
+    # É a instância que atende os clientes: subir com cuidado.
+    chatwoot_concurrency: int = 5
     # Etiquetas que bloqueiam reprocessamento (separadas por vírgula).
     chatwoot_pause_labels: str = "pausar_ia,pausar-ia,pause_ia,ia_pausada"
     # Etiquetas de handoff/agendamento — também NÃO são elegíveis a reprocessar.

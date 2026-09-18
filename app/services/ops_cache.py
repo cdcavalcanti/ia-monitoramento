@@ -197,6 +197,27 @@ def _log_conta(c: dict[str, Any]) -> str:
     )
 
 
+def _slim_elegivel(x: dict[str, Any], *, silencio: float, somente_hoje: bool) -> dict[str, Any]:
+    """Lead elegível como fica no cache — o relatório lê daqui e manda ao enviar_lote,
+    que só aceita quem tem elegivel_reprocessamento=True (scripts/smoke_ops_cache)."""
+    return {
+        "cliente": x.get("account_nome") or x.get("cliente"),
+        "account_id": x.get("account_id"),
+        "conversation_id": x.get("conversation_id"),
+        "inbox_id": x.get("inbox_id"),
+        "nome": x.get("nome"),
+        "telefone": x.get("telefone"),
+        "minutos_sem_resposta": x.get("minutos_sem_resposta"),
+        "link": x.get("link"),
+        "pausado": False,
+        "elegivel_reprocessamento": True,
+        "causa_suspeita": x.get("causa_suspeita"),
+        "ultimo_incoming_em": x.get("ultimo_incoming_em"),
+        "labels": x.get("labels") or [],
+        "log": _log_chatwoot_elegivel(x, silencio=silencio, somente_hoje=somente_hoje),
+    }
+
+
 def set_chatwoot(dados: dict[str, Any], *, status: str = "ok") -> None:
     from app.services.reprocess import filtrar_pendentes_reprocess
 
@@ -208,25 +229,7 @@ def set_chatwoot(dados: dict[str, Any], *, status: str = "ok") -> None:
     silencio = float(dados.get("silencio_minutos") or 5)
     somente_hoje = bool(dados.get("somente_hoje", True))
 
-    slim_e = []
-    for x in elegiveis[:80]:
-        slim_e.append(
-            {
-                "cliente": x.get("account_nome") or x.get("cliente"),
-                "account_id": x.get("account_id"),
-                "conversation_id": x.get("conversation_id"),
-                "inbox_id": x.get("inbox_id"),
-                "nome": x.get("nome"),
-                "telefone": x.get("telefone"),
-                "minutos_sem_resposta": x.get("minutos_sem_resposta"),
-                "link": x.get("link"),
-                "pausado": False,
-                "causa_suspeita": x.get("causa_suspeita"),
-                "ultimo_incoming_em": x.get("ultimo_incoming_em"),
-                "labels": x.get("labels") or [],
-                "log": _log_chatwoot_elegivel(x, silencio=silencio, somente_hoje=somente_hoje),
-            }
-        )
+    slim_e = [_slim_elegivel(x, silencio=silencio, somente_hoje=somente_hoje) for x in elegiveis[:80]]
     slim_p = []
     for x in pausados[:40]:
         slim_p.append(
@@ -463,25 +466,7 @@ def patch_chatwoot_elegiveis(
     elegiveis_full = filtrar_pendentes_reprocess(list(elegiveis_full or []))
     silencio = float(cw.get("silencio_minutos") or 5)
     somente_hoje = bool(cw.get("somente_hoje", True))
-    slim_e = []
-    for x in elegiveis_full[:80]:
-        slim_e.append(
-            {
-                "cliente": x.get("account_nome") or x.get("cliente"),
-                "account_id": x.get("account_id"),
-                "conversation_id": x.get("conversation_id"),
-                "inbox_id": x.get("inbox_id"),
-                "nome": x.get("nome"),
-                "telefone": x.get("telefone"),
-                "minutos_sem_resposta": x.get("minutos_sem_resposta"),
-                "link": x.get("link"),
-                "pausado": False,
-                "causa_suspeita": x.get("causa_suspeita"),
-                "ultimo_incoming_em": x.get("ultimo_incoming_em"),
-                "labels": x.get("labels") or [],
-                "log": _log_chatwoot_elegivel(x, silencio=silencio, somente_hoje=somente_hoje),
-            }
-        )
+    slim_e = [_slim_elegivel(x, silencio=silencio, somente_hoje=somente_hoje) for x in elegiveis_full[:80]]
     totais = dict(cw.get("totais") or {})
     totais["elegiveis"] = len(slim_e)
     cw["elegiveis"] = slim_e

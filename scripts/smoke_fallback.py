@@ -12,6 +12,7 @@ sys.path.insert(0, ".")
 from app.agent.graph import _fallback_sem_llm  # noqa: E402
 from app.collectors.base import resultado_ok, resultado_stub  # noqa: E402
 from app.services.aggregator import agregar  # noqa: E402
+from app.services.delivery import _resumo_executivo  # noqa: E402
 
 
 def main() -> None:
@@ -26,7 +27,7 @@ def main() -> None:
                     "cliente": "Acme",
                     "projeto": "Core",
                     "responsavel": "Ana",
-                    "coluna": "Atrasado",
+                    "coluna": {"id": "atrasado", "rotulo": "Atrasado"},
                     "diasAtraso": 3,
                 }
             ],
@@ -43,9 +44,13 @@ def main() -> None:
         }
     )
     md = _fallback_sem_llm(snap)
-    assert "## 1. Resumo executivo" in md
-    assert "## 2. Gestão Infinity" in md
+    # Mesma estrutura que o prompt pede à IA (app/agent/prompts.py), na ordem.
+    secoes = [l for l in md.splitlines() if l.startswith("## ")]
+    esperadas = ["## 1. Panorama", "## 2. Gestão por cliente", "## 3. Hub", "## 4. Chatwoot", "## 5. Plano", "## 6. Fontes"]
+    assert len(secoes) == len(esperadas) and all(s.startswith(e) for s, e in zip(secoes, esperadas)), secoes
     assert "Bug crítico" in md
+    # O resumo do WhatsApp sai da seção 1 — tem que carregar o atraso.
+    assert "Atrasado" in _resumo_executivo(md), _resumo_executivo(md)
     print("smoke_fallback OK")
     print(md[:500])
 
